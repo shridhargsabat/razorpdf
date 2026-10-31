@@ -132,12 +132,14 @@ pub struct HttpVlmProvider {
 
 impl HttpVlmProvider {
     /// Build from explicit config (URL falls back to `RAZORPDF_VLM_URL`,
-    /// key to `OPENAI_API_KEY`).
+    /// then `OPENAI_BASE_URL` with `/chat/completions` appended; key to
+    /// `OPENAI_API_KEY`).
     pub fn new(config: VlmConfig) -> Result<Self> {
         let endpoint = config
             .url
             .clone()
             .or_else(|| std::env::var("RAZORPDF_VLM_URL").ok())
+            .or_else(crate::config::openai_base_url_endpoint)
             .context("no VLM endpoint: set RAZORPDF_VLM_URL or pass --vlm-url")?;
         let api_key = config
             .api_key

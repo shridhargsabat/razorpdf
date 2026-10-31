@@ -65,10 +65,20 @@ pub struct VlmConfig {
     pub canvas_source: CanvasSource,
 }
 
+/// `OPENAI_BASE_URL` holds a base (…/v1); expand to the chat route.
+#[must_use]
+pub fn openai_base_url_endpoint() -> Option<String> {
+    std::env::var("OPENAI_BASE_URL")
+        .ok()
+        .map(|b| format!("{}/chat/completions", b.trim_end_matches('/')))
+}
+
 impl Default for VlmConfig {
     fn default() -> Self {
         Self {
-            url: std::env::var("RAZORPDF_VLM_URL").ok(),
+            url: std::env::var("RAZORPDF_VLM_URL")
+                .ok()
+                .or_else(openai_base_url_endpoint),
             api_key: std::env::var("OPENAI_API_KEY").ok(),
             model: std::env::var("RAZORPDF_VLM_MODEL")
                 .unwrap_or_else(|_| "qwen2-vl-7b-instruct".to_string()),

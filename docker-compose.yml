@@ -1,0 +1,23 @@
+# Try razorpdf with zero local setup (needs only Docker):
+#   docker compose run --rm parse        # parse samples/invoice.pdf -> ./out/
+#   docker compose run --rm mcp           # MCP server over stdio (Ctrl-D to quit)
+#   docker compose run --rm parse inspect samples/invoice.pdf
+services:
+  parse:
+    build: .
+    image: razorpdf:latest
+    volumes:
+      - ./samples:/work:ro
+      - ./out:/out
+    # Override CMD per run, e.g.:
+    # docker compose run --rm parse parse /work/invoice.pdf --json /out/inv.json
+    command: ["parse", "/work/invoice.pdf", "-o", "/out/invoice.md", "--json", "/out/invoice.json"]
+
+  mcp:
+    build: .
+    image: razorpdf:latest
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./samples:/work:ro
+    command: ["mcp"]

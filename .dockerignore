@@ -1,0 +1,7 @@
+target/
+.venv/
+__pycache__/
+.git/
+tests/wild/*.pdf
+dist/
+docs/assets/

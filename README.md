@@ -22,6 +22,17 @@ tar xzf razorpdf.tar.gz && ./razorpdf parse paper.pdf -o paper.md --json paper.j
 
 One-liner installs (`pip install razorpdf`, `cargo install razorpdf`) land with v0.1.1.
 
+Or run the container (builds once, then parse + MCP server included):
+
+```bash
+git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf
+docker compose run --rm parse   # samples/invoice.pdf -> ./out/invoice.{md,json}
+```
+
+No Docker either? Try it in your browser (runs once v0.1.1 is on PyPI):
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/shridhargsabat/razorpdf/blob/main/docs/notebook/razorpdf_quickstart.ipynb)
+
 ## Why razorpdf?
 
 Most PDF pipelines force an expensive tradeoff: flat text extractors mangle multi-column papers and borderless tables, while full-page vision/OCR pipelines burn seconds and thousands of image tokens on simple text pages. `razorpdf` combines both worlds:
@@ -211,6 +222,13 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parse_pdf"
   }
 }
 ```
+
+### 4. More ways to try
+
+* **Gradio demo / HF Space:** `demo/` is a Space-ready app (upload a PDF, get Markdown + chunks + bbox view). Deploy it once `razorpdf` 0.1.1 is on PyPI — see `demo/README.md`.
+* **Notebook:** [`docs/notebook/razorpdf_quickstart.ipynb`](docs/notebook/razorpdf_quickstart.ipynb) (Colab badge above).
+* **RAG frameworks:** [`docs/integrations.md`](docs/integrations.md) — LangChain loader (tested, in `demo/`) + LlamaIndex snippet.
+* **VLM providers:** [`docs/vlm-providers.md`](docs/vlm-providers.md) — Ollama, OpenAI, Gemini, and any OpenAI-compatible endpoint.
 
 ## CLI Reference
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Head-to-head: razorpdf vs pypdf vs pdfminer.six vs pymupdf on tests/wild.
+"""Head-to-head: razorpdf vs text extractors vs Rust parsers vs Docling.
 
-Measures wall-clock ms + pages/sec per file (median of 3 runs after 1
-warmup) and checks GST/Attention content fidelity per backend.
+Fast backends run the full tests/wild suite; heavy model pipelines
+(Docling) run a small-file section. Wall-clock ms + pages/sec per file
+(median of 3 runs after 1 warmup), GST/Attention fidelity markers, and
+Markdown table-row counts per backend.
 
 Usage (from repo root, bindings installed, e.g. `maturin develop`):
     .venv/bin/python scripts/bench_wild.py
@@ -35,6 +37,9 @@ FIDELITY = {
         "O(n",
     ],
 }
+
+RUNS = 3
+HEAVY_MAX_PAGES = 2  # heavy pipelines only run files this small
 
 
 def bench_razorpdf(path: Path):
@@ -77,47 +82,66 @@ def bench_pymupdf(path: Path):
     return dt, text, npages
 
 
-BACKENDS = [
-    ("razorpdf", bench_razorpdf),
-    ("pypdf", bench_pypdf),
-    ("pdfminer", bench_pdfminer),
-    ("pymupdf", bench_pymupdf),
+def bench_rasgapdf(path: Path):
+    import rasgapdf
+
+    t0 = time.perf_counter()
+    text = rasgapdf.extract_text(str(path))
+    dt = (time.perf_counter() - t0) * 1000.0
+    return dt, text, 0
+
+
+def bench_oxidize(path: Path):
+    import oxidize_pdf
+
+    t0 = time.perf_counter()
+    reader = oxidize_pdf.PdfReader.open(str(path))
+    pages = reader.extract_text()
+    dt = (time.perf_counter() - t0) * 1000.0
+    text = "\n".join(pages) if isinstance(pages, list) else str(pages)
+    return dt, text, 0
+
+
+_DOCLING_CONVERTER = None
+
+
+def bench_docling(path: Path):
+    from docling.document_converter import DocumentConverter
+
+    global _DOCLING_CONVERTER
+    if _DOCLING_CONVERTER is None:
+        _DOCLING_CONVERTER = DocumentConverter()
+    t0 = time.perf_counter()
+    result = _DOCLING_CONVERTER.convert(str(path))
+    md = result.document.export_to_markdown()
+    dt = (time.perf_counter() - t0) * 1000.0
+    return dt, md, 0
+
+
+FAST_BACKENDS = [
+    ("razorpdf", bench_razorpdf, "razorpdf"),
+    ("pypdf", bench_pypdf, "pypdf"),
+    ("pdfminer", bench_pdfminer, "pdfminer.six"),
+    ("pymupdf", bench_pymupdf, "pymupdf"),
+    ("rasgapdf", bench_rasgapdf, "rasgapdf"),
+    ("oxidize", bench_oxidize, "oxidize-pdf"),
 ]
 
-RUNS = 3
+HEAVY_BACKENDS = [
+    ("docling", bench_docling, "docling"),
+]
 
 
-def main() -> int:
-    if not WILD:
-        print("no PDFs in tests/wild — see tests/wild/README.md", file=sys.stderr)
-        return 1
-    versions = {}
-    try:
-        import razorpdf  # noqa: F401
-        versions["razorpdf"] = "0.1.0 (release)"
-    except ImportError:
-        print("razorpdf bindings not installed (maturin develop)", file=sys.stderr)
-        return 1
-    try:
-        from importlib.metadata import version
+def table_rows(text: str) -> int:
+    return sum(1 for ln in text.splitlines() if ln.startswith("|") and "---" not in ln)
 
-        versions["pypdf"] = version("pypdf")
-        versions["pdfminer"] = version("pdfminer.six")
-        versions["pymupdf"] = version("pymupdf")
-    except Exception as exc:  # noqa: BLE001
-        print(f"missing backend dep: {exc}", file=sys.stderr)
-        return 1
-    print("versions:", ", ".join(f"{k}={v}" for k, v in versions.items()))
 
-    # Page counts from pypdf (neutral ground truth for pages/sec).
-    from pypdf import PdfReader
-
-    npages = {f: len(PdfReader(str(f)).pages) for f in WILD}
-
+def run_suite(backends, files, npages):
+    """Returns {backend: {filename: (median_ms, text)}}."""
     results: dict[str, dict[str, tuple[float, str]]] = {}
-    for name, fn in BACKENDS:
+    for name, fn, _ in backends:
         results[name] = {}
-        for path in WILD:
+        for path in files:
             try:
                 fn(path)  # warmup
                 samples = []
@@ -129,33 +153,37 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"{name} FAILED on {path.name}: {exc}", file=sys.stderr)
                 results[name][path.name] = (float("nan"), "")
+    return results
 
-    print("\n## Wall-clock (median ms of 3, 1 warmup) + pages/sec\n")
-    hdr = ["file", "pages"] + [n for n, _ in BACKENDS]
+
+def print_speed_table(backends, files, npages, results):
+    hdr = ["file", "pages"] + [n for n, _, _ in backends]
     print("| " + " | ".join(hdr) + " |")
     print("|" + "|".join(["---"] * len(hdr)) + "|")
-    totals: dict[str, float] = {n: 0.0 for n, _ in BACKENDS}
+    totals: dict[str, float] = {n: 0.0 for n, _, _ in backends}
     total_pages = 0
-    for path in WILD:
+    for path in files:
         n = npages[path]
         total_pages += n
         row = [path.stem, str(n)]
-        for name, _ in BACKENDS:
+        for name, _, _ in backends:
             ms, _ = results[name][path.name]
             totals[name] += ms
             row.append(f"{ms:.0f} ms ({n / ms * 1000:.0f} p/s)")
         print("| " + " | ".join(row) + " |")
     total_row = ["TOTAL", str(total_pages)]
-    for name, _ in BACKENDS:
+    for name, _, _ in backends:
         total_row.append(f"{totals[name]:.0f} ms ({total_pages / totals[name] * 1000:.0f} p/s)")
     print("| " + " | ".join(total_row) + " |")
 
-    print("\n## Fidelity (markers found / total)\n")
-    print("| file | " + " | ".join(n for n, _ in BACKENDS) + " | md table rows (razorpdf) |")
-    print("|" + "|".join(["---"] * (len(BACKENDS) + 2)) + "|")
+
+def print_fidelity_table(backends, results):
+    names = [n for n, _, _ in backends]
+    print("| file | " + " | ".join(names) + " |")
+    print("|" + "|".join(["---"] * (len(names) + 1)) + "|")
     for stem, markers in FIDELITY.items():
         row = [stem]
-        for name, _ in BACKENDS:
+        for name in names:
             text = results[name].get(f"{stem}.pdf", (0.0, ""))[1]
             found = sum(1 for m in markers if m in text)
             missing = [m for m in markers if m not in text]
@@ -163,14 +191,82 @@ def main() -> int:
             if missing:
                 cell += f" (miss: {', '.join(missing)})"
             row.append(cell)
-        md = results["razorpdf"].get(f"{stem}.pdf", (0.0, ""))[1]
-        rows = sum(
-            1
-            for ln in md.splitlines()
-            if ln.startswith("|") and "---" not in ln
-        )
-        row.append(str(rows))
         print("| " + " | ".join(row) + " |")
+
+
+def print_structure_table(backends, results):
+    names = [n for n, _, _ in backends]
+    print("| file | " + " | ".join(f"{n} rows" for n in names) + " |")
+    print("|" + "|".join(["---"] * (len(names) + 1)) + "|")
+    for stem in FIDELITY:
+        row = [stem]
+        for name in names:
+            text = results[name].get(f"{stem}.pdf", (0.0, ""))[1]
+            row.append(str(table_rows(text)))
+        print("| " + " | ".join(row) + " |")
+
+
+def main() -> int:
+    if not WILD:
+        print("no PDFs in tests/wild — see tests/wild/README.md", file=sys.stderr)
+        return 1
+    from importlib.metadata import version
+
+    try:
+        import razorpdf  # noqa: F401
+
+        print(f"versions: razorpdf={version('razorpdf')} (release)", end="")
+    except ImportError:
+        print("razorpdf bindings not installed (maturin develop)", file=sys.stderr)
+        return 1
+
+    # Optional backends: present only if importable.
+    fast, heavy = [], []
+    for name, fn, dist in FAST_BACKENDS:
+        try:
+            version(dist)
+            fast.append((name, fn, dist))
+            print(f", {name}={version(dist)}", end="")
+        except Exception:  # noqa: BLE001
+            print(f"\n(skip {name}: not installed)", file=sys.stderr)
+    if len(fast) < 2:
+        print("need at least razorpdf + one competitor", file=sys.stderr)
+        return 1
+    for name, fn, dist in HEAVY_BACKENDS:
+        try:
+            version(dist)
+            heavy.append((name, fn, dist))
+            print(f", {name}={version(dist)}", end="")
+        except Exception:  # noqa: BLE001
+            print(f"\n(skip {name}: not installed)", file=sys.stderr)
+    print()
+
+    from pypdf import PdfReader
+
+    npages = {f: len(PdfReader(str(f)).pages) for f in WILD}
+
+    print("\n## Fast backends — wall-clock (median ms of 3, 1 warmup) + pages/sec\n")
+    fast_results = run_suite(fast, WILD, npages)
+    print_speed_table(fast, WILD, npages, fast_results)
+
+    print("\n## Fidelity (markers found / total)\n")
+    print_fidelity_table(fast, fast_results)
+
+    print("\n## Structure (Markdown table rows emitted)\n")
+    print_structure_table(fast, fast_results)
+
+    small = [f for f in WILD if npages[f] <= HEAVY_MAX_PAGES]
+    if heavy and small:
+        names = ["razorpdf"] + [n for n, _, _ in heavy]
+        subset = [(n, f, d) for n, f, d in fast if n == "razorpdf"] + heavy
+        print(f"\n## Heavy pipelines — files ≤ {HEAVY_MAX_PAGES} pages\n")
+        heavy_results = run_suite(heavy, small, npages)
+        merged = {"razorpdf": fast_results["razorpdf"], **heavy_results}
+        print_speed_table(subset, small, npages, merged)
+        print("\n## Heavy fidelity\n")
+        print_fidelity_table(subset, merged)
+        print("\n## Heavy structure (Markdown table rows)\n")
+        print_structure_table(subset, merged)
     return 0
 
 
