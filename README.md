@@ -140,16 +140,20 @@ Parsing releases the GIL, so thread pools scale across cores.
 
 ## Benchmarks
 
-Measured with `razorpdf bench` (100-page mixed two-column/single-column/
-bordered-table paper, fast path, no VLM) on an AMD EPYC 9354P (4 vCPU):
+Measured with `razorpdf bench` (400-page mixed two-column/single-column/
+bordered-table paper, fast path, no VLM; median of 3 timed runs after 3
+warmups) on an AMD EPYC 9354P (4 vCPU):
 
 | Build | Pages/sec | ms/page | Extract | Full assembly |
 |---|---|---|---|---|
-| debug | 1,493 | 0.67 | 31.6 ms | 67.0 ms |
-| release | 13,523 | 0.07 | 3.1 ms | 7.4 ms |
+| debug | 2,219 | 0.45 | 152.4 ms | 180.3 ms |
+| release | 16,720 | 0.06 | 11.4 ms | 23.9 ms |
 
-Reproduce: `cargo run --release -p razorpdf-cli -- bench --pages 100`.
+Reproduce: `cargo run --release -p razorpdf-cli -- bench`.
 Criterion suite: `cargo bench -p razorpdf-core --bench throughput`.
+Assembly (triage + block layout) runs parallel over pages via rayon, so
+shared-host scheduling jitter shows run-to-run; the median-of-3 report
+absorbs single-sample noise.
 
 ### Wild head-to-head (real PDFs, Python API)
 

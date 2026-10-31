@@ -79,6 +79,18 @@ pub struct PageTriage {
 /// Score a page and extract VLM fallback regions.
 #[must_use]
 pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> PageTriage {
+    let lines = merge_spans_to_lines(&page.spans);
+    score_page_with_lines(page, &lines, config)
+}
+
+/// Score a page with pre-merged lines (saves a merge when the caller
+/// already merged for table detection).
+#[must_use]
+pub fn score_page_with_lines(
+    page: &RawPageElements,
+    lines: &[TextLine],
+    config: &ParserConfig,
+) -> PageTriage {
     // Structural rule 1: scanned page.
     if is_scanned_page(page) {
         let content = BBox::new(0.0, 0.0, page.width, page.height);
@@ -94,10 +106,9 @@ pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> PageTriage {
         };
     }
 
-    let lines = merge_spans_to_lines(&page.spans);
-    let med_font = body_font_size(&lines).max(1.0);
+    let med_font = body_font_size(lines).max(1.0);
     let involved = overlap_involvement(&page.spans);
-    let runs = entropy_runs(&lines, med_font);
+    let runs = entropy_runs(lines, med_font);
     let diagrams = diagram_clusters(&page.vectors);
 
     // Page-level S(R) with the same formula.

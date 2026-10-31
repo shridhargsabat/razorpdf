@@ -122,30 +122,43 @@ pub fn inspect(input: &str) -> Result<()> {
 
 /// Benchmark fast-path throughput on a synthetic N-page document.
 ///
-/// One untimed warmup run, then a timed full assembly (extract → triage →
-/// blocks → chunks) with no VLM provider, so the number is pure geometric
-/// throughput.
+/// Three untimed warmup runs (CPU governor ramp + rayon pool + allocator),
+/// then three timed full assemblies (extract → triage → blocks → chunks)
+/// with no VLM provider; the reported number is the MEDIAN, so a single
+/// noisy sample on a shared host cannot swing the result.
 pub async fn bench(pages: usize, as_json: bool) -> Result<()> {
     if pages == 0 {
         anyhow::bail!("--pages must be at least 1");
     }
+    const TIMED_RUNS: usize = 3;
     let config = ParserConfig::default();
     let build_started = std::time::Instant::now();
     let pdf = test_fixtures::mixed_paper_pdf(pages);
     let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
 
     let vlm = Arc::new(NoVlmProvider);
-    // Warmup (rayon pool, allocator) — untimed.
-    assembler::assemble_document(&pdf, "bench.pdf", &config, Arc::clone(&vlm)).await?;
+    // Warmup (governor ramp, rayon pool, allocator) — untimed.
+    for _ in 0..TIMED_RUNS {
+        assembler::assemble_document(&pdf, "bench.pdf", &config, Arc::clone(&vlm)).await?;
+    }
 
     let extract_started = std::time::Instant::now();
     let extracted = extractor::extract_document(&pdf, "bench.pdf")?;
     let extract_ms = extract_started.elapsed().as_secs_f64() * 1000.0;
     let spans: usize = extracted.iter().map(|p| p.spans.len()).sum();
 
-    let started = std::time::Instant::now();
-    let doc = assembler::assemble_document(&pdf, "bench.pdf", &config, vlm).await?;
-    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut samples = Vec::with_capacity(TIMED_RUNS);
+    let mut last_doc = None;
+    for _ in 0..TIMED_RUNS {
+        let started = std::time::Instant::now();
+        let doc =
+            assembler::assemble_document(&pdf, "bench.pdf", &config, Arc::clone(&vlm)).await?;
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        last_doc = Some(doc);
+    }
+    let doc = last_doc.expect("at least one timed run");
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let elapsed_ms = samples[TIMED_RUNS / 2];
     let pages_per_sec = pages as f64 / elapsed_ms * 1000.0;
     let ms_per_page = elapsed_ms / pages as f64;
 
@@ -167,7 +180,9 @@ pub async fn bench(pages: usize, as_json: bool) -> Result<()> {
             }))?
         );
     } else {
-        println!("razorpdf bench: {pages}-page mixed paper (fast path, no VLM)");
+        println!(
+            "razorpdf bench: {pages}-page mixed paper (fast path, no VLM; median of {TIMED_RUNS})"
+        );
         println!("  pdf bytes      : {}", pdf.len());
         println!("  fixture build  : {build_ms:.1} ms");
         println!("  extraction     : {extract_ms:.1} ms");

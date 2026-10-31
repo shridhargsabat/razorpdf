@@ -63,8 +63,10 @@ struct InspectArgs {
 
 #[derive(clap::Args)]
 struct BenchArgs {
-    /// Synthetic document pages (two-col/single/bordered mix).
-    #[arg(long, default_value_t = 100)]
+    /// Synthetic document pages (two-col/single/bordered mix). Default 400:
+    /// a ~30 ms window where engine throughput dominates host noise (a
+    /// 100-page/8 ms sample is mostly scheduling jitter on shared hosts).
+    #[arg(long, default_value_t = 400)]
     pages: usize,
     /// Emit machine-readable JSON instead of the human table.
     #[arg(long)]

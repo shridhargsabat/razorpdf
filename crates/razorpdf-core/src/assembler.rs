@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use rayon::prelude::*;
 use tokio::sync::Semaphore;
 
 use crate::config::ParserConfig;
@@ -40,15 +41,17 @@ where
     let started = std::time::Instant::now();
     let pages = extractor::extract_document(pdf, source_path)?;
 
-    // 1. Triage every page (fast, synchronous). Deterministic tables take
-    // precedence over VLM regions they cover: geometry already won, so the
-    // region is dropped before any VLM call is issued.
-    let triaged: Vec<PageTriage> = pages
-        .iter()
+    // 1. Triage every page (parallel over pages; order-preserving).
+    // Deterministic tables take precedence over VLM regions they cover:
+    // geometry already won, so the region is dropped before any VLM call.
+    // Lines merge once per page and are reused by triage, precedence, and
+    // block layout below.
+    let triaged_lines: Vec<(PageTriage, Vec<crate::geometry::lines::TextLine>)> = pages
+        .par_iter()
         .map(|p| {
-            let mut verdict = triage::score_page(p, config);
+            let lines = geometry::merge_spans_to_lines(&p.spans);
+            let mut verdict = triage::score_page_with_lines(p, &lines, config);
             if !verdict.fallback_regions.is_empty() {
-                let lines = geometry::merge_spans_to_lines(&p.spans);
                 let tables = geometry::detect_all_tables(
                     &p.vectors,
                     &p.spans,
@@ -64,9 +67,15 @@ where
                     })
                 });
             }
-            verdict
+            (verdict, lines)
         })
         .collect();
+    let mut triaged: Vec<PageTriage> = Vec::with_capacity(pages.len());
+    let mut all_lines: Vec<Vec<crate::geometry::lines::TextLine>> = Vec::with_capacity(pages.len());
+    for (verdict, lines) in triaged_lines {
+        triaged.push(verdict);
+        all_lines.push(lines);
+    }
     let total_pages = pages.len();
     let fast_path_pages = triaged
         .iter()
@@ -85,12 +94,21 @@ where
     // 3. Bounded-concurrency VLM completion; failures degrade per-region.
     let resolved = complete_jobs(jobs, vlm, config.vlm.max_concurrency.max(1)).await;
 
-    // 4. Blocks per page, Markdown per page, chunks across the document.
+    // 4. Blocks per page, Markdown per page (parallel), chunks across doc.
     let mut all_blocks: Vec<LayoutBlock> = Vec::new();
     let mut markdown_pages: Vec<String> = Vec::new();
-    for (page, tri) in pages.iter().zip(triaged.iter()) {
-        let blocks = page_to_blocks(page, tri, &resolved, config);
-        markdown_pages.push(emitter::blocks_to_markdown(&blocks));
+    let page_outputs: Vec<(Vec<LayoutBlock>, String)> = pages
+        .par_iter()
+        .zip(triaged.par_iter())
+        .zip(all_lines.par_iter())
+        .map(|((page, tri), lines)| {
+            let blocks = page_to_blocks(page, lines, tri, &resolved, config);
+            let markdown = emitter::blocks_to_markdown(&blocks);
+            (blocks, markdown)
+        })
+        .collect();
+    for (blocks, markdown) in page_outputs {
+        markdown_pages.push(markdown);
         all_blocks.extend(blocks);
     }
     let chunks = emitter::synthesize_chunks(&all_blocks);
@@ -200,16 +218,16 @@ where
 /// lives in the table/region block), as are tables swallowed by a region.
 fn page_to_blocks(
     page: &RawPageElements,
+    lines: &[crate::geometry::lines::TextLine],
     triage: &PageTriage,
     resolved: &BTreeMap<(usize, usize), String>,
     config: &ParserConfig,
 ) -> Vec<LayoutBlock> {
-    let lines = geometry::merge_spans_to_lines(&page.spans);
     let tables = geometry::detect_all_tables(
         &page.vectors,
         &page.spans,
-        &lines,
-        geometry::body_font_size(&lines),
+        lines,
+        geometry::body_font_size(lines),
         &page.filled_rects,
     );
     let regions = &triage.fallback_regions;
@@ -239,10 +257,10 @@ fn page_to_blocks(
         boxes.push(region.content_bbox);
         items.push(Item::Region(r));
     }
-    let med_font = geometry::body_font_size(&lines).max(1.0);
-    let med_h = geometry::lines::median_line_height(&lines).max(1.0);
+    let med_font = geometry::body_font_size(lines).max(1.0);
+    let med_h = geometry::lines::median_line_height(lines).max(1.0);
     let order = geometry::xy_cut::reading_order_with_medians(&boxes, med_font, med_h, config);
-    let median_body = geometry::body_font_size(&lines);
+    let median_body = geometry::body_font_size(lines);
 
     let inside_region =
         |x: f32, y: f32| regions.iter().any(|r| r.content_bbox.contains_point(x, y));
