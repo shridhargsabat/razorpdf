@@ -18,6 +18,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # razorpdf-py (PyO3) builds as part of --workspace; its build
+      # script needs a Python interpreter on PATH.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
