@@ -177,11 +177,13 @@ def print_speed_table(backends, files, npages, results):
     print("| " + " | ".join(total_row) + " |")
 
 
-def print_fidelity_table(backends, results):
+def print_fidelity_table(backends, results, stems=None):
     names = [n for n, _, _ in backends]
     print("| file | " + " | ".join(names) + " |")
     print("|" + "|".join(["---"] * (len(names) + 1)) + "|")
     for stem, markers in FIDELITY.items():
+        if stems is not None and stem not in stems:
+            continue
         row = [stem]
         for name in names:
             text = results[name].get(f"{stem}.pdf", (0.0, ""))[1]
@@ -194,11 +196,13 @@ def print_fidelity_table(backends, results):
         print("| " + " | ".join(row) + " |")
 
 
-def print_structure_table(backends, results):
+def print_structure_table(backends, results, stems=None):
     names = [n for n, _, _ in backends]
     print("| file | " + " | ".join(f"{n} rows" for n in names) + " |")
     print("|" + "|".join(["---"] * (len(names) + 1)) + "|")
     for stem in FIDELITY:
+        if stems is not None and stem not in stems:
+            continue
         row = [stem]
         for name in names:
             text = results[name].get(f"{stem}.pdf", (0.0, ""))[1]
@@ -226,7 +230,8 @@ def main() -> int:
         try:
             version(dist)
             fast.append((name, fn, dist))
-            print(f", {name}={version(dist)}", end="")
+            if name != "razorpdf":  # already printed in the header
+                print(f", {name}={version(dist)}", end="")
         except Exception:  # noqa: BLE001
             print(f"\n(skip {name}: not installed)", file=sys.stderr)
     if len(fast) < 2:
@@ -264,9 +269,10 @@ def main() -> int:
         merged = {"razorpdf": fast_results["razorpdf"], **heavy_results}
         print_speed_table(subset, small, npages, merged)
         print("\n## Heavy fidelity\n")
-        print_fidelity_table(subset, merged)
+        run_stems = [f.stem for f in small]
+        print_fidelity_table(subset, merged, stems=run_stems)
         print("\n## Heavy structure (Markdown table rows)\n")
-        print_structure_table(subset, merged)
+        print_structure_table(subset, merged, stems=run_stems)
     return 0
 
 

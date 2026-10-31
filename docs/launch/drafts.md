@@ -30,7 +30,8 @@ Body:
 >    {x0,y0,x1,y1} bbox, breadcrumb trail, token estimate, VLM provenance.
 >
 > Measured on 117 real pages (arXiv papers, Mozilla report, GST invoice):
-> 325 ms total (360 pages/sec) vs pypdf 24, pdfminer 14, pymupdf 268 —
+> 345 ms total (339 pages/sec) vs pymupdf 305, oxidize-pdf 218, pypdf 21,
+> pdfminer 15 —
 > and only razorpdf recovers the tables as structure (13 table rows on the
 > Attention paper). 48 sub-page regions across 117 pages needed any VLM;
 > both invoices needed zero.
@@ -58,8 +59,8 @@ Body:
 
 Alt (numbers-first):
 
-> 117 real PDF pages in 325 ms: razorpdf (360 p/s) vs pymupdf 268, pypdf 24,
-> pdfminer 14. Geometry fast path + sub-page VLM fallback, grounded bboxes
+> 117 real PDF pages in 345 ms: razorpdf (339 p/s) vs pymupdf 305, oxidize 218,
+> pypdf 21, pdfminer 15. Geometry fast path + sub-page VLM fallback, grounded bboxes
 > on every chunk.
 >
 > `pip install razorpdf` · demo GIF below 👇
@@ -74,7 +75,7 @@ Alt (numbers-first):
 > messy sub-page regions get cropped and sent to a vision model — ~425 image
 > tokens instead of ~2,125 per page, zero for clean pages.
 >
-> On 117 real pages (papers, reports, invoices): 360 pages/sec with tables
+> On 117 real pages (papers, reports, invoices): 339 pages/sec with tables
 > recovered as structure. CLI, MCP server, and Python bindings included.
 >
 > `pip install razorpdf`

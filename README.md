@@ -7,7 +7,7 @@
 
 **Ultra-fast, local-first PDF parser: PDFs in, clean LLM-ready Markdown plus grounded RAG chunks out.**
 
-Deterministic Rust geometry handles the easy 90%+ of document layouts in microseconds per page (`16,720 pages/sec` on synthetic benchmarks; `360 pages/sec` across real arXiv papers and tax invoices). Only genuinely messy sub-page regions ($S(R) \ge 0.45$) ever get cropped to WebP and sent to a Vision Language Model (VLM).
+Deterministic Rust geometry handles the easy 90%+ of document layouts in microseconds per page (`16,720 pages/sec` on synthetic benchmarks; `339 pages/sec` across real arXiv papers and tax invoices). Only genuinely messy sub-page regions ($S(R) \ge 0.45$) ever get cropped to WebP and sent to a Vision Language Model (VLM).
 
 ![razorpdf demo: Table 1 of "Attention Is All You Need" with triage boxes, the extracted Markdown table, and the grounded chunk JSON](docs/assets/hero-demo.png)
 
@@ -39,7 +39,7 @@ Most PDF pipelines force an expensive tradeoff: flat text extractors mangle mult
 
 | Capability | Flat Text Extractors (`pypdf`, `pdfminer`, `pymupdf`) | Full-Page VLM / OCR Pipelines | `razorpdf` (Hybrid Geometry + Sub-Page VLM) |
 | :--- | :--- | :--- | :--- |
-| **Throughput (117-page wild suite)** | 14–268 pages/sec | < 1–5 pages/sec | **360 pages/sec (325 ms total)** |
+| **Throughput (117-page wild suite)** | 15–828 pages/sec (flat text only; fastest has fidelity gaps — see below) | < 1–5 pages/sec | **339 pages/sec (345 ms total) + tables as structure** |
 | **Multi-column reading order** | Often interleaved across columns | Accurate (high latency) | **Deterministic recursive XY-cut** |
 | **Table structure recovery** | Flattened into plain text lines | Full-page image inference | **R-tree vector grid + sub-page VLM fallback** |
 | **VLM token cost** | Zero | Every page rendered & billed | **Cropped WebP of failing BBox only** |
@@ -267,25 +267,43 @@ Measured with `razorpdf bench` (400-page mixed two-column, single-column, and bo
 
 ### Wild Head-to-Head (Real PDFs, Python API)
 
-`scripts/bench_wild.py` benchmarks `razorpdf.parse_file` (release bindings) against `pypdf`, `pdfminer.six`, and `pymupdf` text extraction on `tests/wild/*.pdf` (median of 3 runs after 1 warmup on the same EPYC 9354P machine; `razorpdf 0.1.0`, `pypdf 6.21.4`, `pdfminer.six 20260107`, `pymupdf 2.0`):
+`scripts/bench_wild.py` benchmarks `razorpdf.parse_file` (release bindings) against flat extractors (`pypdf`, `pdfminer.six`, `pymupdf`) and fellow Rust parsers (`rasgapdf`, `oxidize-pdf`) on `tests/wild/*.pdf` (median of 3 runs after 1 warmup on the same EPYC 9354P machine; `razorpdf 0.1.1`, `pypdf 6.21.4`, `pdfminer.six 20260107`, `pymupdf 2.0`, `rasgapdf 0.3.3`, `oxidize-pdf 0.23.1`):
 
-| File | Pages | `razorpdf` | `pypdf` | `pdfminer.six` | `pymupdf` |
-| :--- | ---: | :--- | :--- | :--- | :--- |
-| `arxiv_attention_2col` | 15 | **93 ms (161 p/s)** | 1,442 ms (10 p/s) | 1,667 ms (9 p/s) | 129 ms (116 p/s) |
-| `arxiv_deepseek_tables` | 86 | **160 ms (537 p/s)** | 2,588 ms (33 p/s) | 4,796 ms (18 p/s) | 227 ms (379 p/s) |
-| `financial_borderless_watermark` | 1 | **<1 ms (2,774 p/s)** | 2 ms (466 p/s) | 7 ms (135 p/s) | 2 ms (549 p/s) |
-| `gst_tax_invoice` | 1 | **<1 ms (3,110 p/s)** | 3 ms (309 p/s) | 10 ms (97 p/s) | 2 ms (508 p/s) |
-| `mozilla_tracemonkey_2col` | 14 | **71 ms (197 p/s)** | 911 ms (15 p/s) | 1,778 ms (8 p/s) | 77 ms (182 p/s) |
-| **TOTAL** | **117** | **325 ms (360 p/s)** | **4,946 ms (24 p/s)** | **8,260 ms (14 p/s)** | **437 ms (268 p/s)** |
+| File | Pages | `razorpdf` | `pypdf` | `pdfminer.six` | `pymupdf` | `rasgapdf` | `oxidize` |
+| :--- | ---: | :--- | :--- | :--- | :--- | :--- | :--- |
+| `arxiv_attention_2col` | 15 | 90 ms (167 p/s) | 1,556 ms (10 p/s) | 1,635 ms (9 p/s) | 112 ms (134 p/s) | **16 ms (912 p/s)** | 258 ms (58 p/s) |
+| `arxiv_deepseek_tables` | 86 | 189 ms (456 p/s) | 2,856 ms (30 p/s) | 4,389 ms (20 p/s) | 198 ms (434 p/s) | **97 ms (887 p/s)** | 228 ms (378 p/s) |
+| `financial_borderless_watermark` | 1 | <1 ms (3,069 p/s) | 2 ms (525 p/s) | 5 ms (182 p/s) | 2 ms (517 p/s) | **0 ms (empty output)** | 0 ms (5,161 p/s) |
+| `gst_tax_invoice` | 1 | <1 ms (2,840 p/s) | 4 ms (263 p/s) | 8 ms (120 p/s) | 2 ms (453 p/s) | **0 ms (empty output)** | 0 ms (5,017 p/s) |
+| `mozilla_tracemonkey_2col` | 14 | 65 ms (214 p/s) | 1,049 ms (13 p/s) | 1,559 ms (9 p/s) | 70 ms (201 p/s) | **27 ms (510 p/s)** | 52 ms (271 p/s) |
+| **TOTAL** | **117** | **345 ms (339 p/s)** | **5,467 ms (21 p/s)** | **7,598 ms (15 p/s)** | **384 ms (305 p/s)** | **141 ms (828 p/s)*** | **538 ms (218 p/s)** |
+
+\* `rasgapdf` 0.3.3 is genuinely the fastest flat extractor on the files it reads — but it returned **empty output for both generated invoices** (verified with path and bytes input), so its TOTAL is flattered by two instant empties. Compare per-file, and see fidelity/structure below.
 
 ### Content Fidelity & Structure Check
 
-| File | `razorpdf` | `pypdf` | `pdfminer.six` | `pymupdf` | Markdown Table Rows (`razorpdf`) |
-| :--- | :---: | :---: | :---: | :---: | ---: |
-| `gst_tax_invoice` | 5/5 | 5/5 | 5/5 | 5/5 | **3** |
-| `arxiv_attention_2col` | 5/5 | 5/5 | 5/5 | 5/5 | **13** |
+| File | `razorpdf` | `pypdf` | `pdfminer.six` | `pymupdf` | `rasgapdf` | `oxidize` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `gst_tax_invoice` | 5/5 | 5/5 | 5/5 | 5/5 | 0/5 (empty) | 5/5 |
+| `arxiv_attention_2col` | 5/5 | 5/5 | 5/5 | 5/5 | 3/5 (miss: Table 1, O(n) | 5/5 |
 
-All four backends recover the marker phrases on these documents, but only `razorpdf` reconstructs the tables as structured Markdown grids (the 3-row GST invoice grid and Attention's Tables 1–3 plus author block) rather than flat text.
+| File | `razorpdf` rows | `pypdf` rows | `pdfminer` rows | `pymupdf` rows | `rasgapdf` rows | `oxidize` rows |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `gst_tax_invoice` | **3** | 0 | 0 | 0 | 0 | 0 |
+| `arxiv_attention_2col` | **13** | 0 | 0 | 0 | 0 | 0 |
+
+Five backends recover the marker phrases, but only `razorpdf` reconstructs the tables as structured Markdown grids (the 3-row GST invoice grid and Attention's Tables 1–3 plus author block) rather than flat text.
+
+### Model Pipelines (Docling)
+
+Heavy vision/layout pipelines trade latency for structure. On the two single-page files (`docling 2.145.0`, models cached, same machine):
+
+| File | Pages | `razorpdf` | `docling` |
+| :--- | ---: | :--- | :--- |
+| `financial_borderless_watermark` | 1 | <1 ms | 1,566 ms (1 p/s) |
+| `gst_tax_invoice` | 1 | <1 ms | 3,382 ms (0 p/s) |
+
+Docling matches razorpdf on the GST invoice (5/5 markers, 3 table rows) — at ~3,400× the latency. That's the gap the hybrid design closes: geometry gives you the structure in microseconds, and the VLM bill only arrives for regions geometry can't solve.
 
 *Reproduce:* `.venv/bin/python scripts/bench_wild.py` (after `maturin develop --release`). The corpus is gitignored — fetch it first per `tests/wild/README.md`; the script degrades gracefully on a partial corpus.
 
