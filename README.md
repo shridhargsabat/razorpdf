@@ -9,6 +9,8 @@
 
 Deterministic Rust geometry handles the easy 90%+ of document layouts in microseconds per page (`16,720 pages/sec` on synthetic benchmarks; `360 pages/sec` across real arXiv papers and tax invoices). Only genuinely messy sub-page regions ($S(R) \ge 0.45$) ever get cropped to WebP and sent to a Vision Language Model (VLM).
 
+![razorpdf demo: Table 1 of "Attention Is All You Need" with triage boxes, the extracted Markdown table, and the grounded chunk JSON](docs/assets/hero-demo.png)
+
 ## Why razorpdf?
 
 Most PDF pipelines force an expensive tradeoff: flat text extractors mangle multi-column papers and borderless tables, while full-page vision/OCR pipelines burn seconds and thousands of image tokens on simple text pages. `razorpdf` combines both worlds:
@@ -19,7 +21,7 @@ Most PDF pipelines force an expensive tradeoff: flat text extractors mangle mult
 | **Multi-column reading order** | Often interleaved across columns | Accurate (high latency) | **Deterministic recursive XY-cut** |
 | **Table structure recovery** | Flattened into plain text lines | Full-page image inference | **R-tree vector grid + sub-page VLM fallback** |
 | **VLM token cost** | Zero | Every page rendered & billed | **Cropped WebP of failing BBox only** |
-| **Grounded RAG citations** | Page number only | Often ungrounded Markdown | **`[page, x0, y0, x1, y1]` + `H1 > H2 > H3` breadcrumbs** |
+| **Grounded RAG citations** | Page number only | Often ungrounded Markdown | **`page_index` + `{x0, y0, x1, y1}` bbox + breadcrumb trail** |
 | **Offline operation** | Yes | Requires GPU / API | **Offline by default (graceful raw-text fallback)** |
 
 ## What You Get Out
@@ -29,15 +31,16 @@ Pass any PDF via CLI, Python, or MCP and receive both structured Markdown and gr
 ```json
 {
   "total_pages": 15,
-  "markdown": "# Attention Is All You Need\n\n## 3 Model Architecture\n\n| Layer Type | Complexity per Layer | Sequential Operations | Maximum Path Length |\n| :--- | :--- | :--- | :--- |\n| Self-Attention | O(n^2 · d) | O(1) | O(1) |\n| Recurrent | O(n · d^2) | O(n) | O(n) |\n",
+  "markdown": "# Attention Is All You Need\n\n...",
   "chunks": [
     {
-      "page": 6,
-      "bbox": [72.0, 148.5, 523.2, 289.0],
-      "breadcrumb": "Attention Is All You Need > 3 Model Architecture > Table 1",
-      "token_count": 84,
-      "vlm_fallback": false,
-      "text": "| Layer Type | Complexity per Layer | Sequential Operations | Maximum Path Length |..."
+      "chunk_id": "p5-005",
+      "page_index": 5,
+      "bbox": {"x0": 124.5, "y0": 137.2, "x1": 468.0, "y1": 181.4},
+      "breadcrumb": ["Attention Is All You Need", "3 Model Architecture"],
+      "markdown": "| Self-Attention | O(n2 ·d) | O(1) | O(1) |\n| --- | ...",
+      "token_estimate": 57,
+      "parsed_by_vlm": false
     }
   ]
 }
@@ -71,13 +74,13 @@ PDF bytes
     │  │
     ▼  ▼
 ┌──────────┐ reading-order Markdown + chunks with
-│ ASSEMBLE │── [page, x0, y0, x1, y1] citations + heading breadcrumbs
+│ ASSEMBLE │── `{x0,y0,x1,y1}` bboxes + breadcrumb trails
 └──────────┘
 ```
 
 * **Fast path is pure geometry:** Line merging, recursive XY-cut, and R-tree vector-table reconstruction run in parallel across cores with zero model calls.
 * **VLM fallback is sub-page:** Only the failing BBox is cropped to WebP and sent — a messy borderless table costs one small image crop, not a full-page render.
-* **Chunks are grounded:** Every chunk carries its `page`, `bbox` (`[x0, y0, x1, y1]`), heading `breadcrumb` (`H1 > H2 > H3`), `token_count`, and whether a VLM produced it.
+* **Chunks are grounded:** Every chunk carries its `chunk_id`, `page_index`, `bbox` (`{x0, y0, x1, y1}` in PDF points), heading `breadcrumb` trail, `token_estimate`, and the `parsed_by_vlm` provenance flag.
 * **Offline by default:** No network calls run in tests or on the fast path. Without `--vlm-url` or `--mock-vlm`, messy regions keep their raw geometric text so content is never dropped silently.
 
 ## Quickstart
@@ -165,7 +168,7 @@ claude mcp add razorpdf /path/to/razorpdf/target/release/razorpdf mcp
 **Example round-trip over `stdio`:**
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parse_pdf","arguments":{"pdf_path":"paper.pdf"}}}' | ./target/release/razorpdf mcp
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parse_pdf","arguments":{"path":"paper.pdf"}}}' | ./target/release/razorpdf mcp
 ```
 
 ```json
@@ -176,7 +179,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parse_pdf"
     "content": [
       {
         "type": "text",
-        "text": "{\"total_pages\":1,\"markdown\":\"# Sample Document\\n...\",\"chunks\":[{\"page\":1,\"bbox\":[72.0,72.0,540.0,120.0],\"breadcrumb\":\"Sample Document\",\"vlm_fallback\":false}]}"
+        "text": "{\"total_pages\":1,\"markdown\":\"# Sample Document\\n...\",\"chunks\":[{\"chunk_id\":\"p0-000\",\"page_index\":0,\"bbox\":{\"x0\":72.0,\"y0\":72.0,\"x1\":540.0,\"y1\":120.0},\"breadcrumb\":[\"Sample Document\"],\"parsed_by_vlm\":false}]}"
       }
     ]
   }
