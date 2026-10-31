@@ -1,7 +1,8 @@
 //! Block-to-Markdown stitching in reading order.
 //!
-//! Minimal live implementation (fast-path block kinds); heading breadcrumb
-//! tracking and VLM-region resolution complete in Phase 4.
+//! Fast-path blocks and resolved VLM regions interleave by `reading_order`.
+//! Unresolved regions degrade gracefully to their raw text so no content is
+//! ever dropped silently.
 
 use crate::models::{BlockKind, LayoutBlock};
 
@@ -46,15 +47,22 @@ pub fn blocks_to_markdown(blocks: &[LayoutBlock]) -> String {
                 resolved_markdown: Some(md),
                 ..
             } => {
-                out.push_str(md);
+                out.push_str(md.trim_end());
                 out.push_str("\n\n");
             }
             BlockKind::VlmFallbackRegion {
                 resolved_markdown: None,
-                reason,
                 ..
             } => {
-                out.push_str(&format!("<!-- unresolved VLM region: {reason:?} -->\n\n"));
+                // Graceful degradation: raw region text keeps the content
+                // searchable when no VLM is configured or a call failed.
+                let raw = b.raw_text.trim();
+                if raw.is_empty() {
+                    out.push_str("<!-- empty unresolved VLM region -->\n\n");
+                } else {
+                    out.push_str(raw);
+                    out.push_str("\n\n");
+                }
             }
         }
     }
@@ -84,5 +92,33 @@ mod tests {
             block(0, BlockKind::Heading { level: 1 }, "First"),
         ];
         assert_eq!(blocks_to_markdown(&blocks), "# First\n\nSecond.\n\n");
+    }
+
+    #[test]
+    fn vlm_regions_prefer_resolved_markdown() {
+        let resolved = block(
+            0,
+            BlockKind::VlmFallbackRegion {
+                reason: crate::models::TriageReason::BorderlessIrregularTable,
+                complexity_score: 0.75,
+                resolved_markdown: Some("| a |\n| --- |\n| b |\n".to_string()),
+            },
+            "raw fallback",
+        );
+        assert_eq!(blocks_to_markdown(&[resolved]), "| a |\n| --- |\n| b |\n\n");
+    }
+
+    #[test]
+    fn unresolved_regions_fall_back_to_raw_text() {
+        let pending = block(
+            0,
+            BlockKind::VlmFallbackRegion {
+                reason: crate::models::TriageReason::OverlappingSpans,
+                complexity_score: 0.6,
+                resolved_markdown: None,
+            },
+            "raw region text",
+        );
+        assert_eq!(blocks_to_markdown(&[pending]), "raw region text\n\n");
     }
 }

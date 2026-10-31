@@ -54,6 +54,10 @@ pub struct VlmConfig {
     pub render_dpi: u32,
     /// WebP quality for sub-page crops (0-100).
     pub webp_quality: u8,
+    /// Per-request HTTP timeout (seconds).
+    pub timeout_secs: u64,
+    /// Max completion tokens per region request.
+    pub max_tokens: u32,
 }
 
 impl Default for VlmConfig {
@@ -66,6 +70,8 @@ impl Default for VlmConfig {
             max_concurrency: 8,
             render_dpi: 150,
             webp_quality: 80,
+            timeout_secs: 180,
+            max_tokens: 2000,
         }
     }
 }

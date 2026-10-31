@@ -37,9 +37,12 @@ struct ParseArgs {
     /// Grounded JSON output path.
     #[arg(long)]
     json: Option<String>,
-    /// VLM endpoint URL (Phase 4; fast path needs none).
+    /// VLM endpoint URL (fast path needs none).
     #[arg(long)]
     vlm_url: Option<String>,
+    /// Resolve VLM regions with the deterministic offline mock provider.
+    #[arg(long)]
+    mock_vlm: bool,
 }
 
 #[derive(clap::Args)]
@@ -54,12 +57,16 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     match Cli::parse().command {
-        Commands::Parse(a) => commands::parse(
-            &a.input,
-            a.output.as_deref(),
-            a.json.as_deref(),
-            a.vlm_url.as_deref(),
-        ),
+        Commands::Parse(a) => {
+            commands::parse(
+                &a.input,
+                a.output.as_deref(),
+                a.json.as_deref(),
+                a.vlm_url.as_deref(),
+                a.mock_vlm,
+            )
+            .await
+        }
         Commands::Inspect(a) => commands::inspect(&a.input),
         Commands::Mcp => mcp_server::run().await,
     }

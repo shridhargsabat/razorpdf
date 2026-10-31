@@ -27,6 +27,7 @@ image = { version = "0.25", features = ["webp", "png"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
+async-trait = "0.1"
 tiktoken-rs = "0.6"
 pyo3 = { version = "0.22", features = ["extension-module"] }
 

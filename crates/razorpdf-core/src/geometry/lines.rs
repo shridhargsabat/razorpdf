@@ -14,6 +14,10 @@ pub const DEFAULT_LINE_MERGE_OVERLAP: f32 = 0.55;
 /// merged box spans the gutter and XY-cut can never split the columns.
 pub const MERGE_MAX_GAP_FONT_MULT: f32 = 2.0;
 
+/// Overlap coefficient at/above which spans are treated as stacked
+/// double-strikes and kept on separate lines.
+pub const STACK_SPLIT_OVERLAP: f32 = 0.5;
+
 /// Default heading threshold multiplier over median body font size.
 pub const DEFAULT_HEADING_SIZE_MULT: f32 = 1.15;
 
@@ -55,7 +59,9 @@ pub fn merge_spans_to_lines_with_threshold(spans: &[TextSpan], threshold: f32) -
 
     // Greedy grouping: attach each span to the existing line with the best
     // vertical overlap above threshold, else start a new line. Spans only
-    // join a line when horizontally adjacent (no gutter-crossing merges).
+    // join a line when horizontally adjacent (no gutter-crossing merges)
+    // and not stacked on top of it (double-strikes stay separate so their
+    // text is not concatenated).
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut group_boxes: Vec<BBox> = Vec::new();
     for idx in order {
@@ -66,6 +72,7 @@ pub fn merge_spans_to_lines_with_threshold(spans: &[TextSpan], threshold: f32) -
             let ratio = span_box.vertical_overlap_ratio(gbox);
             if ratio > threshold
                 && span_box.h_gap(gbox) <= max_gap
+                && span_box.overlap(gbox) < STACK_SPLIT_OVERLAP
                 && best.is_none_or(|(_, r)| ratio > r)
             {
                 best = Some((gi, ratio));
@@ -294,6 +301,18 @@ mod tests {
         let lines = merge_spans_to_lines(&spans);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Hello");
+    }
+
+    #[test]
+    fn stacked_duplicates_stay_split() {
+        // Double-strike (overlap ~= 0.96): separate lines, no doubled text.
+        let spans = vec![
+            span("Item0", 72.0, 100.0, 102.0, 111.0, 11.0),
+            span("Item0", 73.2, 100.0, 103.2, 111.0, 11.0),
+        ];
+        let lines = merge_spans_to_lines(&spans);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "Item0");
     }
 
     #[test]

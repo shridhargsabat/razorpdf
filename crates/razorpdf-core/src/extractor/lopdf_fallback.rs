@@ -12,16 +12,66 @@ use std::io::Read;
 use crate::models::{BBox, RawPageElements, TextSpan, VectorSegment};
 
 /// Extract every page of a PDF into raw elements.
+///
+/// Page inputs are gathered sequentially (cheap borrows), then content
+/// streams are decoded and walked in parallel with rayon.
 pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageElements>> {
+    use rayon::prelude::*;
+
     let doc = Document::load_mem(pdf).context("parse pdf bytes")?;
     let pages = doc.get_pages();
     let mut order: Vec<(u32, ObjectId)> = pages.into_iter().collect();
     order.sort_by_key(|(n, _)| *n);
-    let mut out = Vec::with_capacity(order.len());
+
+    let mut inputs = Vec::with_capacity(order.len());
     for (page_index, (_, id)) in order.iter().enumerate() {
-        out.push(extract_page_with_doc(&doc, *id, page_index)?);
+        let page_obj = doc.get_object(*id).context("page object")?;
+        let page_dict = resolve_dict(&doc, page_obj).context("page dict")?;
+        let (ml, mb, mr, mt) = media_box(page_dict);
+        let fonts = font_map(&doc, page_dict).unwrap_or_default();
+        let content_bytes = page_content(&doc, page_dict).context("page contents")?;
+        inputs.push(PageInput {
+            page_index,
+            origin_x: ml,
+            top_y: mt,
+            width: (mr - ml).max(1.0),
+            height: (mt - mb).max(1.0),
+            fonts,
+            content_bytes,
+        });
     }
+
+    let mut out: Vec<RawPageElements> = inputs
+        .into_par_iter()
+        .map(|input| {
+            let content = Content::decode(&input.content_bytes).context("decode content stream")?;
+            let mut state = WalkState::new(input.origin_x, input.top_y, input.fonts);
+            for op in &content.operations {
+                state.apply(op);
+            }
+            Ok(RawPageElements {
+                page_index: input.page_index,
+                width: input.width,
+                height: input.height,
+                spans: state.spans,
+                vectors: state.vectors,
+                image_bboxes: Vec::new(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    out.sort_by_key(|p| p.page_index);
     Ok(out)
+}
+
+/// Owned per-page extractor inputs (all `Send` for rayon).
+struct PageInput {
+    page_index: usize,
+    origin_x: f32,
+    top_y: f32,
+    width: f32,
+    height: f32,
+    fonts: BTreeMap<String, FontInfo>,
+    content_bytes: Vec<u8>,
 }
 
 /// Extract a single page (0-based `page_index`) from a PDF.
@@ -31,37 +81,6 @@ pub fn extract_page(pdf: &[u8], page_index: usize) -> Result<RawPageElements> {
         .into_iter()
         .nth(page_index)
         .context("page index out of range")
-}
-
-fn extract_page_with_doc(
-    doc: &Document,
-    page_id: ObjectId,
-    page_index: usize,
-) -> Result<RawPageElements> {
-    let page_obj = doc.get_object(page_id).context("page object")?;
-    let page_dict = resolve_dict(doc, page_obj).context("page dict")?;
-
-    let (ml, mb, mr, mt) = media_box(page_dict);
-    let width = (mr - ml).max(1.0);
-    let height = (mt - mb).max(1.0);
-
-    let fonts = font_map(doc, page_dict).unwrap_or_default();
-    let content_bytes = page_content(doc, page_dict).context("page contents")?;
-    let content = Content::decode(&content_bytes).context("decode content stream")?;
-
-    let mut state = WalkState::new(ml, mt, fonts);
-    for op in &content.operations {
-        state.apply(op);
-    }
-
-    Ok(RawPageElements {
-        page_index,
-        width,
-        height,
-        spans: state.spans,
-        vectors: state.vectors,
-        image_bboxes: Vec::new(),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -532,18 +551,23 @@ mod tests {
     fn extracts_messy_overlap_table() {
         let pdf = test_fixtures::messy_overlap_table_pdf();
         let p = extract_page(&pdf, 0).expect("extract");
-        assert_eq!(p.spans.len(), 20);
+        assert_eq!(p.spans.len(), 33, "title + 2 para + 30 stacked islands");
         assert!(p.vectors.is_empty());
 
-        let dups: Vec<&TextSpan> = p
-            .spans
-            .iter()
-            .filter(|s| s.text == "Total amount due 42.00")
-            .collect();
-        assert_eq!(dups.len(), 2);
-        assert!(
-            dups[0].bbox.overlap(&dups[1].bbox) > 0.9,
-            "duplicate pair must heavily overlap"
-        );
+        // Every island text appears exactly twice (stacked double-strike).
+        for r in 0..5 {
+            for text in [
+                format!("Item{r}"),
+                format!("{} pcs", r + 1),
+                format!("{}.99", (r + 1) * 7),
+            ] {
+                let hits: Vec<&TextSpan> = p.spans.iter().filter(|s| s.text == text).collect();
+                assert_eq!(hits.len(), 2, "{text} must be double-struck");
+                assert!(
+                    hits[0].bbox.overlap(&hits[1].bbox) > 0.9,
+                    "{text} layers must heavily overlap"
+                );
+            }
+        }
     }
 }

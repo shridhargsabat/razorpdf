@@ -193,8 +193,9 @@ pub fn bordered_table_pdf() -> Vec<u8> {
     build_pdf(c)
 }
 
-/// Messy page: overlapping spans + irregular borderless islands.
-/// 20 spans, 0 vectors. Designed to trip triage scoring (Phase 3).
+/// Messy page: stacked double-strike spans over irregular borderless islands.
+/// 33 spans (title + 2 para + 5 rows x 3 islands x 2 layers), 0 vectors.
+/// Trips triage: full overlap involvement + column entropy (S = 0.75).
 pub fn messy_overlap_table_pdf() -> Vec<u8> {
     let mut c = String::new();
     c.push_str(&text("F2", 16.0, 72.0, 60.0, "Messy Invoice Scan"));
@@ -212,10 +213,9 @@ pub fn messy_overlap_table_pdf() -> Vec<u8> {
         116.0,
         "Values may overlap due to bad kerning.",
     ));
-    // Overlapping duplicate pair (1pt x-offset => overlap ~= 0.99).
-    c.push_str(&text("F1", 11.0, 72.0, 150.0, "Total amount due 42.00"));
-    c.push_str(&text("F1", 11.0, 73.0, 150.0, "Total amount due 42.00"));
-    // Irregular borderless islands: misaligned x0 across rows.
+    // Irregular borderless islands: misaligned x0 across rows, each island
+    // double-struck with a 1.2pt-offset copy (overlap ~= 0.96) like a
+    // watermark over the table.
     let jitter = [
         [0.0, 0.0, 0.0],
         [14.0, -22.0, 10.0],
@@ -225,21 +225,23 @@ pub fn messy_overlap_table_pdf() -> Vec<u8> {
     ];
     for (r, j) in jitter.iter().enumerate() {
         let y = 190.0 + r as f32 * 16.0;
-        c.push_str(&text("F1", 11.0, 72.0 + j[0], y, &format!("Item{r}")));
-        c.push_str(&text(
-            "F1",
-            11.0,
-            250.0 + j[1],
-            y,
-            &format!("{} pcs", r + 1),
-        ));
-        c.push_str(&text(
-            "F1",
-            11.0,
-            420.0 + j[2],
-            y,
-            &format!("{}.99", (r + 1) * 7),
-        ));
+        for dx in [0.0, 1.2] {
+            c.push_str(&text("F1", 11.0, 72.0 + j[0] + dx, y, &format!("Item{r}")));
+            c.push_str(&text(
+                "F1",
+                11.0,
+                250.0 + j[1] + dx,
+                y,
+                &format!("{} pcs", r + 1),
+            ));
+            c.push_str(&text(
+                "F1",
+                11.0,
+                420.0 + j[2] + dx,
+                y,
+                &format!("{}.99", (r + 1) * 7),
+            ));
+        }
     }
     build_pdf(c)
 }

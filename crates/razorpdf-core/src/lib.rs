@@ -3,6 +3,7 @@
 //! Pipeline: extract → geometry (lines, XY-cut, tables) → triage →
 //! VLM fallback (sub-page only) → emit (Markdown + grounded chunks).
 
+pub mod assembler;
 pub mod config;
 pub mod emitter;
 pub mod extractor;
