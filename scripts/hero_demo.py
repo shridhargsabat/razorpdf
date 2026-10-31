@@ -106,7 +106,7 @@ def text_panel(
 
 def main() -> int:
     if not CLI.exists():
-        print(f"build the CLI first: cargo build --release -p razorpdf-cli", file=sys.stderr)
+        print(f"build the CLI first: cargo build --release -p razorpdf", file=sys.stderr)
         return 1
     doc = parse()
     chunks = [c for c in doc["chunks"] if c["page_index"] == PAGE_INDEX]

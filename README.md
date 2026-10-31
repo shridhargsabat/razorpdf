@@ -89,7 +89,7 @@ PDF bytes
 
 ```bash
 git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf
-cargo build --release -p razorpdf-cli
+cargo build --release -p razorpdf
 
 # Parse a PDF to Markdown (stdout or file) plus grounded JSON chunks
 ./target/release/razorpdf parse paper.pdf -o paper.md --json paper.json
@@ -206,7 +206,7 @@ Measured with `razorpdf bench` (400-page mixed two-column, single-column, and bo
 | **debug** | 2,219 | 0.45 | 152.4 ms | 180.3 ms |
 | **release** | **16,720** | **0.06** | **11.4 ms** | **23.9 ms** |
 
-*Reproduce:* `cargo run --release -p razorpdf-cli -- bench`
+*Reproduce:* `cargo run --release -p razorpdf -- bench`
 *Criterion suite:* `cargo bench -p razorpdf-core --bench throughput`
 
 ### Wild Head-to-Head (Real PDFs, Python API)
@@ -252,7 +252,7 @@ razorpdf/
 │   ├── razorpdf-core/            # Engine: extract -> geometry -> triage -> VLM -> emit
 │   │   ├── benches/throughput.rs # Criterion pages/sec benchmark suite
 │   │   └── examples/dump_fixtures.rs
-│   ├── razorpdf-cli/             # Binary: parse / inspect / bench / mcp
+│   ├── razorpdf/             # Binary: parse / inspect / bench / mcp
 │   └── razorpdf-py/              # PyO3 bindings: parse_file / to_markdown (+ GIL release)
 ├── scripts/
 │   └── bench_wild.py             # Real-world PDF benchmark vs pypdf, pdfminer.six, pymupdf

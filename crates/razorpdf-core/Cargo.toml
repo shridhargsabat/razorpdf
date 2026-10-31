@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Core Rust engine for razorpdf: geometry, triage, VLM fallback, output"
+keywords = ["pdf", "parser", "rag", "layout-analysis", "mcp"]
+categories = ["parser-implementations"]
 
 [lib]
 name = "razorpdf_core"

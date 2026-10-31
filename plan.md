@@ -46,7 +46,7 @@ razorpdf/
 │   │       │   ├── markdown.rs
 │   │       │   └── chunks.rs
 │   │       └── test_fixtures.rs    # Synthetic PDF generator for offline tests
-│   ├── razorpdf-cli/               # CLI binary + Built-in MCP Server
+│   ├── razorpdf/               # CLI binary + Built-in MCP Server
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs
@@ -241,7 +241,7 @@ Where:
 
 ### Phase 1: Workspace Bootstrap & Synthetic PDF Generator
 * **Tasks:**
-  1. Initialize the Cargo workspace with `razorpdf-core`, `razorpdf-cli`, and `razorpdf-py`.
+  1. Initialize the Cargo workspace with `razorpdf-core`, `razorpdf`, and `razorpdf-py`.
   2. Implement `models.rs` and `geometry/bbox.rs` with full unit tests for intersection, union, overlap, and coordinate flipping.
   3. Build `test_fixtures.rs` using `lopdf` to programmatically generate 4 in-memory test PDFs:
      * `single_col_clean.pdf` (Headings + paragraphs)
@@ -273,7 +273,7 @@ Where:
 
 ### Phase 5: CLI, Built-in MCP Server & Python Bindings
 * **Tasks:**
-  1. Build `razorpdf-cli` with subcommands:
+  1. Build `razorpdf` with subcommands:
      * `razorpdf parse <input.pdf> [-o out.md] [--json out.json] [--vlm-url ...]`
      * `razorpdf inspect <input.pdf>` (Prints per-page complexity scores $S(R)$ and triage decisions in a terminal table)
      * `razorpdf mcp` (Starts a Model Context Protocol JSON-RPC 2.0 server over `stdin`/`stdout` exposing tools: `parse_pdf`, `inspect_pdf_layout`, and `extract_pdf_tables`).

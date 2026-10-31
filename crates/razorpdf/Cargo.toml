@@ -1,17 +1,20 @@
 [package]
-name = "razorpdf-cli"
+name = "razorpdf"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "CLI binary + built-in MCP server for razorpdf"
+repository.workspace = true
+description = "Hybrid local-first PDF parser: deterministic Rust geometry + selective sub-page VLM. CLI + MCP server."
+keywords = ["pdf", "cli", "rag", "mcp", "parser"]
+categories = ["command-line-utilities", "parser-implementations"]
 
 [[bin]]
 name = "razorpdf"
 path = "src/main.rs"
 
 [dependencies]
-razorpdf-core = { path = "../razorpdf-core" }
+razorpdf-core = { version = "0.1.1", path = "../razorpdf-core" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
