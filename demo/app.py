@@ -1,7 +1,7 @@
 """razorpdf Gradio demo: upload a PDF, get Markdown + grounded chunks + bbox view.
 
-Run locally (needs a razorpdf install: `pip install razorpdf` once v0.1.1
-is on PyPI, or `maturin develop` from crates/razorpdf-py):
+Run locally (needs a razorpdf install: `pip install razorpdf`
+or `maturin develop` from crates/razorpdf-py):
     pip install -r demo/requirements.txt
     python demo/app.py
 

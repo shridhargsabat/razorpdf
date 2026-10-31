@@ -244,7 +244,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parse_pdf"
 
 ### 4. More ways to try
 
-* **Gradio demo / HF Space:** `demo/` is a Space-ready app (upload a PDF, get Markdown + chunks + bbox view). Deploy it once `razorpdf` 0.1.1 is on PyPI — see `demo/README.md`.
+* **Gradio demo / HF Space:** `demo/` is a Space-ready app (upload a PDF, get Markdown + chunks + bbox view) — see `demo/README.md`.
 * **Notebook:** [`docs/notebook/razorpdf_quickstart.ipynb`](docs/notebook/razorpdf_quickstart.ipynb) (Colab badge above).
 * **RAG frameworks:** [`docs/integrations.md`](docs/integrations.md) — LangChain loader (tested, in `demo/`) + LlamaIndex snippet.
 * **VLM providers:** [`docs/vlm-providers.md`](docs/vlm-providers.md) — Ollama, OpenAI, Gemini, and any OpenAI-compatible endpoint.
