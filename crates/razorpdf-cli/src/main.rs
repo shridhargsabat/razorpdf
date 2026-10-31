@@ -1,10 +1,10 @@
-//! `razorpdf` CLI: parse, inspect, and serve MCP tools.
+//! `razorpdf` CLI: parse, inspect, bench, and serve MCP tools.
 
 mod commands;
 mod mcp_server;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -13,8 +13,12 @@ use clap::{Parser, Subcommand};
     about = "Ultra-fast local-first document parser"
 )]
 struct Cli {
+    /// Start the MCP stdio server (same as the `mcp` subcommand).
+    #[arg(long)]
+    mcp: bool,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -23,7 +27,9 @@ enum Commands {
     Parse(ParseArgs),
     /// Print per-page layout stats and triage decisions.
     Inspect(InspectArgs),
-    /// Start the MCP JSON-RPC server over stdin/stdout (Phase 5).
+    /// Benchmark fast-path throughput on a synthetic multi-page document.
+    Bench(BenchArgs),
+    /// Start the MCP JSON-RPC server over stdin/stdout.
     Mcp,
 }
 
@@ -51,13 +57,27 @@ struct InspectArgs {
     input: String,
 }
 
+#[derive(clap::Args)]
+struct BenchArgs {
+    /// Synthetic document pages (two-col/single/bordered mix).
+    #[arg(long, default_value_t = 100)]
+    pages: usize,
+    /// Emit machine-readable JSON instead of the human table.
+    #[arg(long)]
+    json: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    match Cli::parse().command {
-        Commands::Parse(a) => {
+    let cli = Cli::parse();
+    if cli.mcp {
+        return mcp_server::run().await;
+    }
+    match cli.command {
+        Some(Commands::Parse(a)) => {
             commands::parse(
                 &a.input,
                 a.output.as_deref(),
@@ -67,7 +87,13 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Commands::Inspect(a) => commands::inspect(&a.input),
-        Commands::Mcp => mcp_server::run().await,
+        Some(Commands::Inspect(a)) => commands::inspect(&a.input),
+        Some(Commands::Bench(a)) => commands::bench(a.pages, a.json).await,
+        Some(Commands::Mcp) => mcp_server::run().await,
+        None => {
+            Cli::command().print_help()?;
+            println!();
+            Ok(())
+        }
     }
 }

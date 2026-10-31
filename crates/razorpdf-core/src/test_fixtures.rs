@@ -1,10 +1,11 @@
 //! Synthetic in-memory PDF generator for offline tests.
 //!
-//! Builds four single-page fixtures with `lopdf` (no `printpdf` needed):
+//! Builds single-page fixtures with `lopdf` (no `printpdf` needed):
 //! - `single_col_clean`: headings + paragraphs
 //! - `two_col_academic`: full-width title + two text columns
 //! - `bordered_table`: vector grid + cell text
 //! - `messy_overlap_table`: overlapping spans + irregular borderless islands
+//! - `mixed_paper_pdf(n)`: N-page fast-path mix for benches
 //!
 //! Layouts are authored in top-left-origin points and converted to PDF
 //! bottom-left coordinates during emission.
@@ -45,8 +46,9 @@ fn vline(x: f32, y0_top: f32, y1_top: f32, w: f32) -> String {
     format!("{w} w {x:.2} {a:.2} m {x:.2} {b:.2} l S\n")
 }
 
-/// Wrap a content stream in a single-page PDF with Helvetica fonts.
-fn build_pdf(content: String) -> Vec<u8> {
+/// Wrap content streams in an N-page PDF with shared Helvetica fonts.
+fn build_pdf_multi(page_contents: Vec<String>) -> Vec<u8> {
+    assert!(!page_contents.is_empty(), "need at least one page");
     let mut doc = Document::with_version("1.7");
 
     let font_reg_id = doc.add_object(Object::Dictionary(dictionary! {
@@ -59,10 +61,6 @@ fn build_pdf(content: String) -> Vec<u8> {
         "Subtype" => "Type1",
         "BaseFont" => "Helvetica-Bold",
     }));
-    let content_id = doc.add_object(Object::Stream(Stream::new(
-        dictionary! {},
-        content.into_bytes(),
-    )));
 
     let mut font_map = lopdf::Dictionary::new();
     font_map.set("F1", Object::Reference(font_reg_id));
@@ -70,30 +68,40 @@ fn build_pdf(content: String) -> Vec<u8> {
     let mut resources = lopdf::Dictionary::new();
     resources.set("Font", Object::Dictionary(font_map));
 
-    let mut page = lopdf::Dictionary::new();
-    page.set("Type", Object::Name(b"Page".to_vec()));
-    page.set(
-        "MediaBox",
-        Object::Array(vec![
-            Object::Integer(0),
-            Object::Integer(0),
-            Object::Integer(PAGE_W as i64),
-            Object::Integer(PAGE_H as i64),
-        ]),
+    let mediabox = Object::Array(vec![
+        Object::Integer(0),
+        Object::Integer(0),
+        Object::Integer(PAGE_W as i64),
+        Object::Integer(PAGE_H as i64),
+    ]);
+    let mut page_ids = Vec::with_capacity(page_contents.len());
+    for content in page_contents {
+        let content_id = doc.add_object(Object::Stream(Stream::new(
+            dictionary! {},
+            content.into_bytes(),
+        )));
+        let mut page = lopdf::Dictionary::new();
+        page.set("Type", Object::Name(b"Page".to_vec()));
+        page.set("MediaBox", mediabox.clone());
+        page.set("Resources", Object::Dictionary(resources.clone()));
+        page.set("Contents", Object::Reference(content_id));
+        // Parent is patched after the Pages node exists.
+        page_ids.push(doc.add_object(Object::Dictionary(page)));
+    }
+
+    let mut pages_node = lopdf::Dictionary::new();
+    pages_node.set("Type", Object::Name(b"Pages".to_vec()));
+    pages_node.set(
+        "Kids",
+        Object::Array(page_ids.iter().map(|id| Object::Reference(*id)).collect()),
     );
-    page.set("Resources", Object::Dictionary(resources));
-    page.set("Contents", Object::Reference(content_id));
-    // Parent is patched after the Pages node exists.
-    let page_id = doc.add_object(Object::Dictionary(page));
+    pages_node.set("Count", Object::Integer(page_ids.len() as i64));
+    let pages_id = doc.add_object(Object::Dictionary(pages_node));
 
-    let mut pages = lopdf::Dictionary::new();
-    pages.set("Type", Object::Name(b"Pages".to_vec()));
-    pages.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
-    pages.set("Count", Object::Integer(1));
-    let pages_id = doc.add_object(Object::Dictionary(pages));
-
-    if let Ok(Object::Dictionary(page_dict)) = doc.get_object_mut(page_id) {
-        page_dict.set("Parent", Object::Reference(pages_id));
+    for page_id in &page_ids {
+        if let Ok(Object::Dictionary(page_dict)) = doc.get_object_mut(*page_id) {
+            page_dict.set("Parent", Object::Reference(pages_id));
+        }
     }
 
     let mut catalog = lopdf::Dictionary::new();
@@ -107,8 +115,7 @@ fn build_pdf(content: String) -> Vec<u8> {
     buf
 }
 
-/// Clean single-column document: title + 2 sections. 17 spans, 0 vectors.
-pub fn single_col_clean_pdf() -> Vec<u8> {
+fn single_col_content() -> String {
     let mut c = String::new();
     c.push_str(&text("F2", 20.0, 72.0, 72.0, "RazorPDF Benchmark Document"));
     c.push_str(&text("F2", 14.0, 72.0, 110.0, "1. Introduction"));
@@ -131,11 +138,15 @@ pub fn single_col_clean_pdf() -> Vec<u8> {
             &format!("Method body line {i} describes the geometric pipeline."),
         ));
     }
-    build_pdf(c)
+    c
 }
 
-/// Academic two-column layout: title + 16 lines per column. 33 spans.
-pub fn two_col_academic_pdf() -> Vec<u8> {
+/// Clean single-column document: title + 2 sections. 17 spans, 0 vectors.
+pub fn single_col_clean_pdf() -> Vec<u8> {
+    build_pdf_multi(vec![single_col_content()])
+}
+
+fn two_col_content() -> String {
     let mut c = String::new();
     c.push_str(&text(
         "F2",
@@ -161,11 +172,15 @@ pub fn two_col_academic_pdf() -> Vec<u8> {
             &format!("Right line {r:02} ghijkl"),
         ));
     }
-    build_pdf(c)
+    c
 }
 
-/// Bordered 4x3 sales table with vector grid. 13 spans, 9 vectors.
-pub fn bordered_table_pdf() -> Vec<u8> {
+/// Academic two-column layout: title + 16 lines per column. 33 spans.
+pub fn two_col_academic_pdf() -> Vec<u8> {
+    build_pdf_multi(vec![two_col_content()])
+}
+
+fn bordered_content() -> String {
     let mut c = String::new();
     c.push_str(&text("F2", 16.0, 72.0, 60.0, "Quarterly Sales"));
     let xs = [72.0, 200.0, 340.0, 480.0];
@@ -190,13 +205,15 @@ pub fn bordered_table_pdf() -> Vec<u8> {
             c.push_str(&text("F1", 10.0, xs[col] + 6.0, ys[r + 1] + 7.0, cell));
         }
     }
-    build_pdf(c)
+    c
 }
 
-/// Messy page: stacked double-strike spans over irregular borderless islands.
-/// 33 spans (title + 2 para + 5 rows x 3 islands x 2 layers), 0 vectors.
-/// Trips triage: full overlap involvement + column entropy (S = 0.75).
-pub fn messy_overlap_table_pdf() -> Vec<u8> {
+/// Bordered 4x3 sales table with vector grid. 13 spans, 9 vectors.
+pub fn bordered_table_pdf() -> Vec<u8> {
+    build_pdf_multi(vec![bordered_content()])
+}
+
+fn messy_content() -> String {
     let mut c = String::new();
     c.push_str(&text("F2", 16.0, 72.0, 60.0, "Messy Invoice Scan"));
     c.push_str(&text(
@@ -243,7 +260,30 @@ pub fn messy_overlap_table_pdf() -> Vec<u8> {
             ));
         }
     }
-    build_pdf(c)
+    c
+}
+
+/// Messy page: stacked double-strike spans over irregular borderless islands.
+/// 33 spans (title + 2 para + 5 rows x 3 islands x 2 layers), 0 vectors.
+/// Trips triage: full overlap involvement + column entropy (S = 0.75).
+pub fn messy_overlap_table_pdf() -> Vec<u8> {
+    build_pdf_multi(vec![messy_content()])
+}
+
+/// N-page mixed-content paper cycling two-column, single-column, and
+/// bordered-table pages (all fast-path; for benches and `razorpdf bench`).
+/// Panics when `pages == 0`.
+pub fn mixed_paper_pdf(pages: usize) -> Vec<u8> {
+    assert!(pages > 0, "need at least one page");
+    build_pdf_multi(
+        (0..pages)
+            .map(|i| match i % 3 {
+                0 => two_col_content(),
+                1 => single_col_content(),
+                _ => bordered_content(),
+            })
+            .collect(),
+    )
 }
 
 /// All fixtures as `(name, bytes)` pairs.
@@ -270,5 +310,18 @@ mod tests {
                 &bytes[..8.min(bytes.len())]
             );
         }
+    }
+
+    #[test]
+    fn multipage_extracts_in_order() {
+        let pdf = mixed_paper_pdf(7);
+        let pages = crate::extractor::extract_document(&pdf, "mixed").expect("extract");
+        assert_eq!(pages.len(), 7);
+        for (i, page) in pages.iter().enumerate() {
+            assert_eq!(page.page_index, i);
+        }
+        assert_eq!(pages[0].spans.len(), 33); // two-col
+        assert_eq!(pages[1].spans.len(), 17); // single
+        assert_eq!(pages[2].spans.len(), 13); // bordered
     }
 }

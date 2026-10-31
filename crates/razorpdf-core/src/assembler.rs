@@ -74,7 +74,7 @@ where
         total_pages,
         fast_path_pages,
         vlm_fallback_regions,
-        elapsed_ms: started.elapsed().as_millis(),
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         markdown: markdown_pages.join("\n"),
         chunks,
     })

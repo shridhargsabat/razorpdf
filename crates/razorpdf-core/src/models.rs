@@ -104,7 +104,7 @@ pub struct ParsedDocument {
     pub total_pages: usize,
     pub fast_path_pages: usize,
     pub vlm_fallback_regions: usize,
-    pub elapsed_ms: u128,
+    pub elapsed_ms: u64,
     pub markdown: String,
     pub chunks: Vec<GroundedChunk>,
 }

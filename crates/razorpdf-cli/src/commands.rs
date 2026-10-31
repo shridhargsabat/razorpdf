@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use razorpdf_core::{
-    assembler, extractor, geometry, triage,
+    assembler, extractor, geometry, test_fixtures, triage,
     vlm::{HttpVlmProvider, MockVlmProvider, NoVlmProvider},
     ParserConfig,
 };
@@ -106,6 +106,68 @@ pub fn inspect(input: &str) -> Result<()> {
                 region.content_bbox.y1,
             );
         }
+    }
+    Ok(())
+}
+
+/// Benchmark fast-path throughput on a synthetic N-page document.
+///
+/// One untimed warmup run, then a timed full assembly (extract → triage →
+/// blocks → chunks) with no VLM provider, so the number is pure geometric
+/// throughput.
+pub async fn bench(pages: usize, as_json: bool) -> Result<()> {
+    if pages == 0 {
+        anyhow::bail!("--pages must be at least 1");
+    }
+    let config = ParserConfig::default();
+    let build_started = std::time::Instant::now();
+    let pdf = test_fixtures::mixed_paper_pdf(pages);
+    let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+
+    let vlm = Arc::new(NoVlmProvider);
+    // Warmup (rayon pool, allocator) — untimed.
+    assembler::assemble_document(&pdf, "bench.pdf", &config, Arc::clone(&vlm)).await?;
+
+    let extract_started = std::time::Instant::now();
+    let extracted = extractor::extract_document(&pdf, "bench.pdf")?;
+    let extract_ms = extract_started.elapsed().as_secs_f64() * 1000.0;
+    let spans: usize = extracted.iter().map(|p| p.spans.len()).sum();
+
+    let started = std::time::Instant::now();
+    let doc = assembler::assemble_document(&pdf, "bench.pdf", &config, vlm).await?;
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let pages_per_sec = pages as f64 / elapsed_ms * 1000.0;
+    let ms_per_page = elapsed_ms / pages as f64;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "pages": pages,
+                "pdf_bytes": pdf.len(),
+                "build_ms": build_ms,
+                "extract_ms": extract_ms,
+                "elapsed_ms": elapsed_ms,
+                "pages_per_sec": pages_per_sec,
+                "ms_per_page": ms_per_page,
+                "spans": spans,
+                "chunks": doc.chunks.len(),
+                "fast_path_pages": doc.fast_path_pages,
+                "vlm_fallback_regions": doc.vlm_fallback_regions,
+            }))?
+        );
+    } else {
+        println!("razorpdf bench: {pages}-page mixed paper (fast path, no VLM)");
+        println!("  pdf bytes      : {}", pdf.len());
+        println!("  fixture build  : {build_ms:.1} ms");
+        println!("  extraction     : {extract_ms:.1} ms");
+        println!("  full assembly  : {elapsed_ms:.1} ms");
+        println!("  throughput     : {pages_per_sec:.1} pages/sec ({ms_per_page:.2} ms/page)");
+        println!("  spans / chunks : {spans} / {}", doc.chunks.len());
+        println!(
+            "  fast pages     : {}  (vlm regions: {})",
+            doc.fast_path_pages, doc.vlm_fallback_regions
+        );
     }
     Ok(())
 }
