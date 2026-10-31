@@ -1,4 +1,5 @@
 # Pin the Python interpreter for pyo3 builds: pyo3 0.22 supports <= 3.13,
-# while the default `python3` on PATH is 3.14.
+# while the default `python3` on PATH may be newer. Bare command name so it
+# resolves via PATH both locally (/usr/bin) and on CI (setup-python).
 [env]
-PYO3_PYTHON = "/usr/bin/python3.12"
+PYO3_PYTHON = "python3.12"
