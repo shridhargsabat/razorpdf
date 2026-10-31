@@ -166,8 +166,10 @@ fn int_to_utf16(width: usize, value: u32) -> String {
 /// UTF-16BE bytes → string (surrogate pairs supported, lossy).
 fn utf16be_to_string(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_be_bytes(*c))
         .collect();
     char::decode_utf16(units.iter().copied())
         .map(|r| r.unwrap_or('\u{FFFD}'))
@@ -756,7 +758,7 @@ fn tokenize_cmap(data: &[u8]) -> Vec<CmapToken> {
                 hex.push(b'0');
             }
             let mut bytes = Vec::with_capacity(hex.len() / 2);
-            for pair in hex.chunks_exact(2) {
+            for pair in hex.as_chunks::<2>().0 {
                 let text = String::from_utf8_lossy(pair);
                 match u8::from_str_radix(&text, 16) {
                     Ok(value) => bytes.push(value),
