@@ -15,6 +15,7 @@ pub async fn parse(
     output: Option<&str>,
     json: Option<&str>,
     vlm_url: Option<&str>,
+    vlm_model: Option<&str>,
     mock_vlm: bool,
     canvas_source: Option<&str>,
 ) -> Result<()> {
@@ -22,6 +23,9 @@ pub async fn parse(
     let mut config = ParserConfig::default();
     if let Some(url) = vlm_url {
         config.vlm.url = Some(url.to_string());
+    }
+    if let Some(model) = vlm_model {
+        config.vlm.model = model.to_string();
     }
     if canvas_source == Some("auto") {
         config.vlm.canvas_source = razorpdf_core::vlm::cropper::CanvasSource::Auto;
@@ -36,7 +40,11 @@ pub async fn parse(
 
     if config.vlm.url.is_some() || std::env::var("RAZORPDF_VLM_URL").is_ok() {
         let http = HttpVlmProvider::new(config.vlm.clone())?;
-        tracing::info!(endpoint = http.endpoint(), "VLM fallback enabled");
+        tracing::info!(
+            endpoint = http.endpoint(),
+            model = config.vlm.model,
+            "VLM fallback enabled"
+        );
         let doc = assembler::assemble_document(&bytes, input, &config, Arc::new(http)).await?;
         return emit(output, json, &doc);
     }

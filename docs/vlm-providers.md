@@ -12,12 +12,13 @@ with `temperature: 0`, parses `choices[0].message.content` as Markdown
 | :--- | :--- | :--- | :--- |
 | Endpoint URL | `--vlm-url` | `RAZORPDF_VLM_URL` (or `OPENAI_BASE_URL`) | none (raw-text fallback) |
 | API key (Bearer) | — | `OPENAI_API_KEY` | none (no auth header) |
-| Model id | — | `RAZORPDF_VLM_MODEL` | `qwen2-vl-7b-instruct` |
+| Model id | `--vlm-model` | `RAZORPDF_VLM_MODEL` | `qwen2-vl-7b-instruct` |
 | Offline demo | `--mock-vlm` | — | — |
-| Crop source | `--canvas-source auto` | — | synthetic canvas |
+| Crop source | `--canvas-source auto` | `canvas_source="auto"` (Python kwarg) | synthetic canvas |
 
-Python mirrors the CLI: `razorpdf.parse_file("x.pdf", vlm_url="…")`
-(model/key still come from the env vars above).
+Python mirrors the CLI: `razorpdf.parse_file("x.pdf", vlm_url="…",
+canvas_source="auto")` (model/key still come from `--vlm-model`'s
+counterparts: `RAZORPDF_VLM_MODEL` / `OPENAI_API_KEY`).
 
 ## Ollama (local, no key)
 

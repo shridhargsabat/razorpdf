@@ -47,6 +47,30 @@ def _render_page_with_boxes(pdf: Path, page_index: int, chunks: list[dict]) -> I
     return img.convert("RGB")
 
 
+def pdf_loaded(pdf_path: str | None) -> tuple:
+    """Bound the page slider to the uploaded PDF (runs on file change)."""
+    if not pdf_path:
+        return gr.update(maximum=1, value=0), "upload a PDF, then hit Parse"
+    n = len(pymupdf.open(str(pdf_path)))
+    return (
+        gr.update(maximum=max(n - 1, 1), value=0),
+        f"{n} page(s) loaded — hit Parse",
+    )
+
+
+def per_page_breakdown(chunks: list[dict]) -> str:
+    """Compact 'p0: 6c/0r, p1: 9c/1r' chunk/region counts (capped)."""
+    pages: dict[int, list[int]] = {}
+    for c in chunks:
+        p = pages.setdefault(c["page_index"], [0, 0])
+        p[0] += 1
+        p[1] += 1 if c["parsed_by_vlm"] else 0
+    parts = [f"p{i}: {v[0]}c/{v[1]}r" for i, v in sorted(pages.items())]
+    if len(parts) > 12:
+        parts = parts[:12] + [f"…+{len(parts) - 12}"]
+    return ", ".join(parts)
+
+
 def parse_pdf(pdf_path: str, page: int, vlm_url: str) -> tuple[str, dict, Image.Image, str]:
     """Run razorpdf and return (markdown, chunks_json, annotated_page, stats)."""
     import razorpdf
@@ -64,6 +88,7 @@ def parse_pdf(pdf_path: str, page: int, vlm_url: str) -> tuple[str, dict, Image.
     stats = (
         f"{doc['total_pages']} pages · {len(chunks)} chunks · "
         f"{doc['vlm_fallback_regions']} VLM regions · {doc['elapsed_ms']:.0f} ms"
+        f" | {per_page_breakdown(chunks)}"
     )
     img = _render_page_with_boxes(pdf, max(page, 0), chunks)
     return doc["markdown"][:20000], {"chunks": slim}, img, stats
@@ -78,7 +103,9 @@ with gr.Blocks(title="razorpdf demo") as demo:
     with gr.Row():
         pdf_in = gr.File(label="PDF", file_types=[".pdf"])
         with gr.Column():
-            page_in = gr.Number(label="Preview page (0-based)", value=0, precision=0)
+            page_in = gr.Slider(
+                label="Preview page", minimum=0, maximum=1, step=1, value=0
+            )
             vlm_in = gr.Textbox(
                 label="VLM endpoint (optional, OpenAI-compatible)",
                 placeholder="http://localhost:11434/v1/chat/completions",
@@ -92,6 +119,7 @@ with gr.Blocks(title="razorpdf demo") as demo:
         img_out = gr.Image(label="Page + chunk bboxes (green = table)")
     go.click(parse_pdf, inputs=[pdf_in, page_in, vlm_in],
              outputs=[md_out, json_out, img_out, stats_out])
+    pdf_in.change(pdf_loaded, inputs=pdf_in, outputs=[page_in, stats_out])
     gr.Markdown(
         "Keys per chunk: `chunk_id`, `page_index`, `bbox {x0,y0,x1,y1}` (PDF points), "
         "`breadcrumb`, `markdown`, `token_estimate`, `parsed_by_vlm`."

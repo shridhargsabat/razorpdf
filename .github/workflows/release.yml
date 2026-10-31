@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -89,25 +90,21 @@ jobs:
       matrix:
         include:
           # One abi3 wheel per platform covers CPython 3.10+.
+          # aarch64 builds natively on an ARM runner (no cross toolchain).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: maturin
             optional: false
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            build: zigbuild
-            optional: true
+            optional: false
           - os: macos-latest
             target: aarch64-apple-darwin
-            build: maturin
             optional: false
           - os: macos-latest
             target: x86_64-apple-darwin
-            build: maturin
             optional: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            build: maturin
             optional: false
     continue-on-error: ${{ matrix.optional }}
     runs-on: ${{ matrix.os }}
@@ -121,27 +118,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: patchelf (manylinux repair)
-        if: runner.os == 'Linux' && matrix.build == 'maturin'
+        if: runner.os == 'Linux'
         run: pip install patchelf
-      - name: zig toolchain (aarch64 cross)
-        if: matrix.build == 'zigbuild'
-        run: |
-          pip install ziglang
-          cargo install cargo-zigbuild --locked
-      - name: build wheels (native)
-        if: matrix.build == 'maturin'
+      - name: build wheels
         uses: PyO3/maturin-action@v1
         with:
           maturin-version: latest
           command: build
           args: --release -m crates/razorpdf-py/Cargo.toml -o dist -i python --target ${{ matrix.target }}
-      - name: build wheels (zigbuild cross)
-        if: matrix.build == 'zigbuild'
-        shell: bash
-        run: |
-          pip install maturin
-          maturin build --release --zigbuild --target ${{ matrix.target }} \
-            -i python -m crates/razorpdf-py/Cargo.toml -o dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.target }}
@@ -182,4 +166,29 @@ jobs:
           merge-multiple: true
       - name: publish
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  docker:
+    name: push GHCR image
+    # Runs on tags AND manual dispatch (dispatch pushes a :main tag for testing).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
 

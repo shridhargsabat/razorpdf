@@ -83,6 +83,21 @@ def test_missing_file_raises():
         raise AssertionError("expected RuntimeError")
 
 
+def test_canvas_source_kwarg():
+    import razorpdf
+
+    for canvas in (None, "synthetic", "auto"):
+        doc = razorpdf.parse_file(fixture("single_col_clean"), canvas_source=canvas)
+        assert doc["total_pages"] == 1
+        assert len(doc["chunks"]) == 17
+    try:
+        razorpdf.parse_file(fixture("single_col_clean"), canvas_source="bogus")
+    except ValueError as exc:
+        assert "canvas_source" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
 def test_threads_parse_concurrently():
     import razorpdf
 
@@ -98,6 +113,7 @@ def main():
         test_to_markdown,
         test_messy_without_vlm_keeps_raw_text,
         test_missing_file_raises,
+        test_canvas_source_kwarg,
         test_threads_parse_concurrently,
     ]
     for test in tests:

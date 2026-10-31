@@ -46,6 +46,9 @@ struct ParseArgs {
     /// VLM endpoint URL (fast path needs none).
     #[arg(long)]
     vlm_url: Option<String>,
+    /// VLM model id (overrides RAZORPDF_VLM_MODEL / default qwen2-vl-7b-instruct).
+    #[arg(long)]
+    vlm_model: Option<String>,
     /// Resolve VLM regions with the deterministic offline mock provider.
     #[arg(long)]
     mock_vlm: bool,
@@ -89,6 +92,7 @@ async fn main() -> Result<()> {
                 a.output.as_deref(),
                 a.json.as_deref(),
                 a.vlm_url.as_deref(),
+                a.vlm_model.as_deref(),
                 a.mock_vlm,
                 a.canvas_source.as_deref(),
             )

@@ -39,6 +39,13 @@ git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf
 docker compose run --rm parse   # samples/invoice.pdf -> ./out/invoice.{md,json}
 ```
 
+Prefer a prebuilt image? Each release publishes to GHCR (starting v0.1.2):
+
+```bash
+docker run --rm -v ./samples:/work:ro ghcr.io/shridhargsabat/razorpdf:latest \
+  parse /work/invoice.pdf
+```
+
 No Docker either? Try it in your browser:
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/shridhargsabat/razorpdf/blob/main/docs/notebook/razorpdf_quickstart.ipynb)
