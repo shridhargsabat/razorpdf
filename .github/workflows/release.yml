@@ -140,6 +140,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          # Only release payloads: the docker job also uploads a *.dockerbuild
+          # build record whose name breaks this step's unfiltered download.
+          pattern: 'cli-*, wheels-*'
           merge-multiple: true
       - name: list assets
         shell: bash
@@ -166,6 +169,8 @@ jobs:
           merge-multiple: true
       - name: publish
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   docker:
     name: push GHCR image
