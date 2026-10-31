@@ -2,8 +2,10 @@
 
 [![CI](https://github.com/shridhargsabat/razorpdf/actions/workflows/ci.yml/badge.svg)](https://github.com/shridhargsabat/razorpdf/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/shridhargsabat/razorpdf/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/razorpdf.svg)](https://pypi.org/project/razorpdf/)
+[![crates.io](https://img.shields.io/crates/v/razorpdf.svg)](https://crates.io/crates/razorpdf)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://github.com/shridhargsabat/razorpdf)
-[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://github.com/shridhargsabat/razorpdf/tree/main/crates/razorpdf-py)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://github.com/shridhargsabat/razorpdf/tree/main/crates/razorpdf-py)
 
 **Ultra-fast, local-first PDF parser: PDFs in, clean LLM-ready Markdown plus grounded RAG chunks out.**
 
@@ -13,14 +15,22 @@ Deterministic Rust geometry handles the easy 90%+ of document layouts in microse
 
 ## Try it in 30 seconds
 
-No toolchain needed — grab a prebuilt binary (Linux shown; macOS/Windows on the [Releases](https://github.com/shridhargsabat/razorpdf/releases) page):
-
 ```bash
-curl -L -o razorpdf.tar.gz https://github.com/shridhargsabat/razorpdf/releases/download/v0.1.0/razorpdf-cli-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-tar xzf razorpdf.tar.gz && ./razorpdf parse paper.pdf -o paper.md --json paper.json
+pip install razorpdf          # Python 3.10+, prebuilt wheels, no Rust needed
+cargo install razorpdf        # CLI + MCP server from source
 ```
 
-One-liner installs (`pip install razorpdf`, `cargo install razorpdf`) land with v0.1.1.
+```python
+import razorpdf
+doc = razorpdf.parse_file("paper.pdf")   # -> {"markdown": ..., "chunks": [...]}
+```
+
+Prefer a binary? Grab one from [Releases](https://github.com/shridhargsabat/razorpdf/releases) (Linux shown):
+
+```bash
+curl -L -o razorpdf.tar.gz https://github.com/shridhargsabat/razorpdf/releases/download/v0.1.1/razorpdf-v0.1.1-x86_64-unknown-linux-gnu.tar.gz
+tar xzf razorpdf.tar.gz && ./razorpdf parse paper.pdf -o paper.md --json paper.json
+```
 
 Or run the container (builds once, then parse + MCP server included):
 
@@ -29,7 +39,7 @@ git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf
 docker compose run --rm parse   # samples/invoice.pdf -> ./out/invoice.{md,json}
 ```
 
-No Docker either? Try it in your browser (runs once v0.1.1 is on PyPI):
+No Docker either? Try it in your browser:
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/shridhargsabat/razorpdf/blob/main/docs/notebook/razorpdf_quickstart.ipynb)
 
@@ -122,32 +132,32 @@ PDF bytes
 
 ![razorpdf CLI demo: parsing a GST invoice to a Markdown table and a grounded JSON chunk](docs/assets/demo.gif)
 
-### 1. Build & Run the CLI (Rust)
+### 1. CLI (Rust)
 
 ```bash
-git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf
-cargo build --release -p razorpdf
+cargo install razorpdf
 
 # Parse a PDF to Markdown (stdout or file) plus grounded JSON chunks
-./target/release/razorpdf parse paper.pdf -o paper.md --json paper.json
+razorpdf parse paper.pdf -o paper.md --json paper.json
 
 # Inspect per-page spans, vectors, lines, tables, S(R) triage scores, and fallback regions
-./target/release/razorpdf inspect paper.pdf
+razorpdf inspect paper.pdf
 
 # Route messy sub-page regions to local Ollama (or any OpenAI-compatible VLM endpoint)
-./target/release/razorpdf parse scan.pdf --vlm-url http://localhost:11434/v1/chat/completions
+razorpdf parse scan.pdf --vlm-url http://localhost:11434/v1/chat/completions
 
 # Run an offline demo of the VLM fallback path using the deterministic mock provider
-./target/release/razorpdf parse messy.pdf --mock-vlm
+razorpdf parse messy.pdf --mock-vlm
 ```
+
+From source: `git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf && cargo build --release -p razorpdf`.
 
 ### 2. Python Bindings
 
 `razorpdf` provides native Rust bindings via PyO3/maturin and releases the Python GIL during parsing so thread pools scale cleanly across CPU cores.
 
 ```bash
-git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf/crates/razorpdf-py
-pip install maturin && maturin develop --release
+pip install razorpdf   # prebuilt abi3 wheels for Linux/macOS/Windows, Python 3.10+
 ```
 
 ```python
@@ -167,6 +177,8 @@ doc = razorpdf.parse_file(
     vlm_url="http://localhost:11434/v1/chat/completions"
 )
 ```
+
+From source: `cd crates/razorpdf-py && pip install maturin && maturin develop --release`.
 
 ### 3. MCP Server (Claude Code / OpenCode / Hermes)
 

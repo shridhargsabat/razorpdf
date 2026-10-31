@@ -13,9 +13,9 @@ pinned: false
 
 Upload a PDF → Markdown + grounded chunks + bbox visualization.
 
-**Deploy to Hugging Face Spaces** (once `razorpdf` 0.1.1 is on PyPI): push
-this directory to a new Space (it already has the `sdk: gradio` frontmatter,
-`app.py`, and `requirements.txt`).
+**Deploy to Hugging Face Spaces:** push this directory to a new Space (it
+already has the `sdk: gradio` frontmatter, `app.py`, and `requirements.txt`
+— `razorpdf` 0.1.1 is on PyPI, so Spaces install it directly).
 
 **Run locally:**
 
