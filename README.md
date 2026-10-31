@@ -11,6 +11,17 @@ Deterministic Rust geometry handles the easy 90%+ of document layouts in microse
 
 ![razorpdf demo: Table 1 of "Attention Is All You Need" with triage boxes, the extracted Markdown table, and the grounded chunk JSON](docs/assets/hero-demo.png)
 
+## Try it in 30 seconds
+
+No toolchain needed — grab a prebuilt binary (Linux shown; macOS/Windows on the [Releases](https://github.com/shridhargsabat/razorpdf/releases) page):
+
+```bash
+curl -L -o razorpdf.tar.gz https://github.com/shridhargsabat/razorpdf/releases/download/v0.1.0/razorpdf-cli-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf razorpdf.tar.gz && ./razorpdf parse paper.pdf -o paper.md --json paper.json
+```
+
+One-liner installs (`pip install razorpdf`, `cargo install razorpdf`) land with v0.1.1.
+
 ## Why razorpdf?
 
 Most PDF pipelines force an expensive tradeoff: flat text extractors mangle multi-column papers and borderless tables, while full-page vision/OCR pipelines burn seconds and thousands of image tokens on simple text pages. `razorpdf` combines both worlds:
@@ -23,6 +34,19 @@ Most PDF pipelines force an expensive tradeoff: flat text extractors mangle mult
 | **VLM token cost** | Zero | Every page rendered & billed | **Cropped WebP of failing BBox only** |
 | **Grounded RAG citations** | Page number only | Often ungrounded Markdown | **`page_index` + `{x0, y0, x1, y1}` bbox + breadcrumb trail** |
 | **Offline operation** | Yes | Requires GPU / API | **Offline by default (graceful raw-text fallback)** |
+
+### Why sub-page VLM wins on cost
+
+Full-page vision pipelines pay image tokens for every page. `razorpdf` pays zero for geometric pages and only a small crop for the rest — measured on the wild suite:
+
+| Input to the VLM | Pixels (150 dpi) | GPT-4o image tokens | Share of wild pages |
+| :--- | ---: | ---: | :--- |
+| Full page | 1241 × 1754 | 2,125 | — (what full-page pipelines send) |
+| Full page, downscaled to 1024 px | 1024 × 1447 | 1,105 | — |
+| **Sub-page crop** (financial table + 8 pt pad) | 1000 × 154 | **425** | 48 regions / 117 pages need any VLM |
+| Pure-geometry page (both invoices) | — | **0** | majority of pages |
+
+At typical frontier-VLM image pricing (~$2.50/1M input tokens, illustrative), that is ~$0.0053 per full-res page vs ~$0.0011 per crop — and geometry itself runs in ~60 µs/page with no model at all.
 
 ## What You Get Out
 
@@ -84,6 +108,8 @@ PDF bytes
 * **Offline by default:** No network calls run in tests or on the fast path. Without `--vlm-url` or `--mock-vlm`, messy regions keep their raw geometric text so content is never dropped silently.
 
 ## Quickstart
+
+![razorpdf CLI demo: parsing a GST invoice to a Markdown table and a grounded JSON chunk](docs/assets/demo.gif)
 
 ### 1. Build & Run the CLI (Rust)
 
@@ -194,6 +220,18 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parse_pdf"
 | `razorpdf inspect <pdf>` | Per-page spans, vectors, lines, tables, $S(R)$ scores, and fallback regions |
 | `razorpdf bench [--pages 400] [--json]` | Fast-path throughput benchmark on a synthetic multi-page document |
 | `razorpdf mcp` (or `razorpdf --mcp`) | Start the MCP JSON-RPC 2.0 server over `stdio` |
+
+## Examples
+
+Bordered invoice table recovered exactly (green box), text around it untouched:
+
+![GST invoice: detected table beside extracted Markdown](docs/assets/before-after-invoice.png)
+
+Rulings-free table under a rotated watermark — the watermark stays isolated in its own chunk and never merges into rows:
+
+![Financial summary: borderless table and isolated watermark beside extracted Markdown](docs/assets/before-after-borderless.png)
+
+Machine-readable outputs live in [`examples/`](examples/) (Markdown + grounded JSON for both invoices and Attention Table 1).
 
 ## Benchmarks
 

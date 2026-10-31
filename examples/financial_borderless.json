@@ -1,0 +1,54 @@
+{
+  "source_path": "tests/wild/financial_borderless_watermark.pdf",
+  "total_pages": 1,
+  "fast_path_pages": 1,
+  "vlm_fallback_regions": 0,
+  "elapsed_ms": 2,
+  "markdown": "## Q3 Unaudited Financial Summary (INR in Lakhs)\n\n# CONFIDENTIAL DRAFT\n\n| Revenue from Operations | 1,420.50 | 1,890.20 | +33.1% |\n| --- | --- | --- | --- |\n| Cloud & AI Compute Costs | 410.00 | 512.80 | +25.0% |\n| EBITDA Margin | 28.4% | 31.2% | +280 bps |\n\n",
+  "chunks": [
+    {
+      "chunk_id": "p0-000",
+      "page_index": 0,
+      "bbox": {
+        "x0": 40.0,
+        "y0": 36.0,
+        "x1": 386.5,
+        "y1": 50.0
+      },
+      "breadcrumb": [],
+      "markdown": "## Q3 Unaudited Financial Summary (INR in Lakhs)\n\n",
+      "token_estimate": 13,
+      "parsed_by_vlm": false
+    },
+    {
+      "chunk_id": "p0-001",
+      "page_index": 0,
+      "bbox": {
+        "x0": 184.78575,
+        "y0": 36.75183,
+        "x1": 523.0082,
+        "y1": 220.0
+      },
+      "breadcrumb": [],
+      "markdown": "# CONFIDENTIAL DRAFT\n\n",
+      "token_estimate": 6,
+      "parsed_by_vlm": false
+    },
+    {
+      "chunk_id": "p0-002",
+      "page_index": 0,
+      "bbox": {
+        "x0": 40.0,
+        "y0": 130.0,
+        "x1": 504.0,
+        "y1": 188.0
+      },
+      "breadcrumb": [
+        "CONFIDENTIAL DRAFT"
+      ],
+      "markdown": "| Revenue from Operations | 1,420.50 | 1,890.20 | +33.1% |\n| --- | --- | --- | --- |\n| Cloud & AI Compute Costs | 410.00 | 512.80 | +25.0% |\n| EBITDA Margin | 28.4% | 31.2% | +280 bps |\n\n",
+      "token_estimate": 47,
+      "parsed_by_vlm": false
+    }
+  ]
+}

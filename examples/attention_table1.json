@@ -1,0 +1,17 @@
+{
+ "chunk_id": "p5-005",
+ "page_index": 5,
+ "bbox": {
+  "x0": 124.547,
+  "y0": 137.15118,
+  "x1": 468.02393,
+  "y1": 181.414
+ },
+ "breadcrumb": [
+  "Attention Is All You Need",
+  "3 Model Architecture"
+ ],
+ "markdown": "| Self-Attention | O(n2 \u00b7d) | O(1) | O(1) |\n| --- | --- | --- | --- |\n| Recurrent | O(n\u00b7d ) 2 | O(n) | O(n) |\n| Convolutional | O(k\u00b7n\u00b7d ) 2 | O(1) | O(logk(n)) |\n| Self-Attention | (restricted)O(r\u00b7n\u00b7d) | O(1) | O(n/r) |\n\n",
+ "token_estimate": 57,
+ "parsed_by_vlm": false
+}

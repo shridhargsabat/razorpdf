@@ -1,0 +1,72 @@
+{
+  "source_path": "tests/wild/gst_tax_invoice.pdf",
+  "total_pages": 1,
+  "fast_path_pages": 1,
+  "vlm_fallback_regions": 0,
+  "elapsed_ms": 1,
+  "markdown": "# TAX INVOICE (ORIGINAL FOR RECIPIENT)\n\nSupplier: Apex Cloud Infra Pvt. Ltd. | GSTIN: 27AABCA1234F1Z5\n\nBuyer: Enterprise Corp Mumbai | GSTIN: 27AAACB5678G1Z2 | State Code: 27\n\n| Sr | Description of Service | HSN/SAC | Qty | Rate (INR) | Taxable | CGST 9% | SGST 9% | Total |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| 1 | Dedicated GPU Node Rental | 998315 | 2 | 45,000.00 | 90,000.00 | 8,100.00 | 8,100.00 | 1,06,200.00 |\n| 2 | Managed Firewall & SD-WAN | 998314 | 1 | 15,000.00 | 15,000.00 | 1,350.00 | 1,350.00 | 17,700.00 |\n\n",
+  "chunks": [
+    {
+      "chunk_id": "p0-000",
+      "page_index": 0,
+      "bbox": {
+        "x0": 40.0,
+        "y0": 34.0,
+        "x1": 356.80002,
+        "y1": 50.0
+      },
+      "breadcrumb": [],
+      "markdown": "# TAX INVOICE (ORIGINAL FOR RECIPIENT)\n\n",
+      "token_estimate": 10,
+      "parsed_by_vlm": false
+    },
+    {
+      "chunk_id": "p0-001",
+      "page_index": 0,
+      "bbox": {
+        "x0": 40.0,
+        "y0": 65.0,
+        "x1": 375.5,
+        "y1": 75.0
+      },
+      "breadcrumb": [
+        "TAX INVOICE (ORIGINAL FOR RECIPIENT)"
+      ],
+      "markdown": "Supplier: Apex Cloud Infra Pvt. Ltd. | GSTIN: 27AABCA1234F1Z5\n\n",
+      "token_estimate": 16,
+      "parsed_by_vlm": false
+    },
+    {
+      "chunk_id": "p0-002",
+      "page_index": 0,
+      "bbox": {
+        "x0": 40.0,
+        "y0": 80.0,
+        "x1": 430.5,
+        "y1": 90.0
+      },
+      "breadcrumb": [
+        "TAX INVOICE (ORIGINAL FOR RECIPIENT)"
+      ],
+      "markdown": "Buyer: Enterprise Corp Mumbai | GSTIN: 27AAACB5678G1Z2 | State Code: 27\n\n",
+      "token_estimate": 19,
+      "parsed_by_vlm": false
+    },
+    {
+      "chunk_id": "p0-003",
+      "page_index": 0,
+      "bbox": {
+        "x0": 40.0,
+        "y0": 116.0,
+        "x1": 575.0,
+        "y1": 182.0
+      },
+      "breadcrumb": [
+        "TAX INVOICE (ORIGINAL FOR RECIPIENT)"
+      ],
+      "markdown": "| Sr | Description of Service | HSN/SAC | Qty | Rate (INR) | Taxable | CGST 9% | SGST 9% | Total |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| 1 | Dedicated GPU Node Rental | 998315 | 2 | 45,000.00 | 90,000.00 | 8,100.00 | 8,100.00 | 1,06,200.00 |\n| 2 | Managed Firewall & SD-WAN | 998314 | 1 | 15,000.00 | 15,000.00 | 1,350.00 | 1,350.00 | 17,700.00 |\n\n",
+      "token_estimate": 92,
+      "parsed_by_vlm": false
+    }
+  ]
+}
