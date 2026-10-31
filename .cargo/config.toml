@@ -1,0 +1,4 @@
+# Pin the Python interpreter for pyo3 builds: pyo3 0.22 supports <= 3.13,
+# while the default `python3` on PATH is 3.14.
+[env]
+PYO3_PYTHON = "/usr/bin/python3.12"

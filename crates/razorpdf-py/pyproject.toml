@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "razorpdf"
+version = "0.1.0"
+description = "Ultra-fast local-first document parser (Python bindings)"
+requires-python = ">=3.9"
+
+[tool.maturin]
+bindings = "pyo3"
+features = ["pyo3/extension-module"]
+manifest-path = "Cargo.toml"
+module-name = "razorpdf.razorpdf"
+python-source = "python"
