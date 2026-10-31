@@ -44,7 +44,12 @@ overlap.
 
 1. Bump `version` in root `Cargo.toml` + `crates/razorpdf-py/pyproject.toml`
    (they must match; CI preflight enforces it).
-2. Tag `vX.Y.Z` and push the tag — `release.yml` builds CLI binaries +
-   wheels, publishes the GitHub Release, PyPI, and crates.io.
-3. Verify `pip install razorpdf==X.Y.Z` and `cargo install razorpdf` in a
+2. Publish the crates (manual, needs a crates.io token — no OIDC wired):
+   `cargo publish -p razorpdf-core`, wait ~60s for indexing, then
+   `cargo publish -p razorpdf`. (To automate: add crates.io trusted
+   publishers and re-add a `crates` job using
+   `rust-lang/crates-io-auth-action`.)
+3. Tag `vX.Y.Z` and push the tag — `release.yml` builds CLI binaries +
+   wheels, publishes the GitHub Release and PyPI (OIDC).
+4. Verify `pip install razorpdf==X.Y.Z` and `cargo install razorpdf` in a
    clean environment, then update the README install notes.
