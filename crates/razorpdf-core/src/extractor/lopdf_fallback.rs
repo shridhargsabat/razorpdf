@@ -5,10 +5,15 @@
 //! to top-left origin on emission.
 
 use anyhow::{Context, Result};
-use lopdf::{content::Content, Document, Object, ObjectId};
-use std::collections::BTreeMap;
+use lopdf::{
+    content::{Content, Operation},
+    Document, Object, ObjectId,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
+use std::sync::Arc;
 
+use super::fonts::{parse_tounicode_cmap, FontDecoding};
 use crate::models::{BBox, RawPageElements, TextSpan, VectorSegment};
 
 /// Extract every page of a PDF into raw elements.
@@ -30,6 +35,7 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
         let (ml, mb, mr, mt) = media_box(page_dict);
         let fonts = font_map(&doc, page_dict).unwrap_or_default();
         let content_bytes = page_content(&doc, page_dict).context("page contents")?;
+        let (forms, images) = collect_xobjects(&doc, page_dict, &fonts);
         inputs.push(PageInput {
             page_index,
             origin_x: ml,
@@ -38,6 +44,8 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
             height: (mt - mb).max(1.0),
             fonts,
             content_bytes,
+            forms,
+            images,
         });
     }
 
@@ -45,7 +53,13 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
         .into_par_iter()
         .map(|input| {
             let content = Content::decode(&input.content_bytes).context("decode content stream")?;
-            let mut state = WalkState::new(input.origin_x, input.top_y, input.fonts);
+            let mut state = WalkState::new(
+                input.origin_x,
+                input.top_y,
+                input.fonts,
+                input.forms,
+                input.images,
+            );
             for op in &content.operations {
                 state.apply(op);
             }
@@ -55,7 +69,8 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
                 height: input.height,
                 spans: state.spans,
                 vectors: state.vectors,
-                image_bboxes: Vec::new(),
+                image_bboxes: state.image_bboxes,
+                filled_rects: state.filled_rects,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -72,6 +87,8 @@ struct PageInput {
     height: f32,
     fonts: BTreeMap<String, FontInfo>,
     content_bytes: Vec<u8>,
+    forms: HashMap<String, Arc<FormXObject>>,
+    images: HashMap<String, (u32, u32)>,
 }
 
 /// Extract a single page (0-based `page_index`) from a PDF.
@@ -127,15 +144,24 @@ struct FontInfo {
     is_bold: bool,
     is_italic: bool,
     is_monospace: bool,
+    decoding: FontDecoding,
 }
 
-/// Map content-stream font refs (`F1`) to font metadata.
+/// Map content-stream font refs (`F1`) to font metadata + decoding.
 fn font_map(doc: &Document, page: &lopdf::Dictionary) -> Result<BTreeMap<String, FontInfo>> {
-    let mut out = BTreeMap::new();
     let resources = page
         .get(b"Resources")
         .map_err(|_| anyhow::anyhow!("no resources"))?;
     let resources = resolve_dict(doc, resources)?;
+    font_map_from_resources(doc, resources)
+}
+
+/// Build the font map from a resource dictionary (page or Form XObject).
+fn font_map_from_resources(
+    doc: &Document,
+    resources: &lopdf::Dictionary,
+) -> Result<BTreeMap<String, FontInfo>> {
+    let mut out = BTreeMap::new();
     let font_dict = resources
         .get(b"Font")
         .map_err(|_| anyhow::anyhow!("no fonts"))?;
@@ -148,30 +174,283 @@ fn font_map(doc: &Document, page: &lopdf::Dictionary) -> Result<BTreeMap<String,
         let Object::Dictionary(fd) = font_obj else {
             continue;
         };
-        let base = fd
-            .get(b"BaseFont")
+        out.insert(font_ref, font_info(doc, fd));
+    }
+    Ok(out)
+}
+
+/// Metadata + decoding tables for one font dictionary.
+fn font_info(doc: &Document, fd: &lopdf::Dictionary) -> FontInfo {
+    let subtype = fd
+        .get(b"Subtype")
+        .ok()
+        .map(obj_name_string)
+        .unwrap_or_default();
+    // Type0 fonts carry the real face in the first descendant.
+    let inner: &lopdf::Dictionary = if subtype == "Type0" {
+        fd.get(b"DescendantFonts")
+            .ok()
+            .and_then(|value| resolve(doc, value).ok())
+            .and_then(|value| match value {
+                Object::Array(items) => items.first().and_then(|item| resolve(doc, item).ok()),
+                _ => None,
+            })
+            .and_then(|value| match value {
+                Object::Dictionary(inner) => Some(inner),
+                _ => None,
+            })
+            .unwrap_or(fd)
+    } else {
+        fd
+    };
+    let base = inner
+        .get(b"BaseFont")
+        .ok()
+        .map(obj_name_string)
+        .unwrap_or_default();
+    let base = strip_subset_prefix(&base);
+    let lower = base.to_lowercase();
+    FontInfo {
+        name: if base.is_empty() {
+            "Unknown".to_string()
+        } else {
+            base
+        },
+        is_bold: lower.contains("bold") || lower.contains("black"),
+        is_italic: lower.contains("italic") || lower.contains("oblique"),
+        is_monospace: lower.contains("courier")
+            || lower.contains("mono")
+            || lower.contains("consolas")
+            || lower.contains("menlo"),
+        decoding: font_decoding(doc, fd, &subtype),
+    }
+}
+
+/// Strip `ABCDEF+` subset prefixes from BaseFont names.
+fn strip_subset_prefix(base: &str) -> String {
+    let bytes = base.as_bytes();
+    if bytes.len() > 7 && bytes[6] == b'+' && bytes[..6].iter().all(|b| b.is_ascii_uppercase()) {
+        base[7..].to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+/// Build decode tables: base encoding + Differences + ToUnicode + Identity.
+fn font_decoding(doc: &Document, fd: &lopdf::Dictionary, subtype: &str) -> FontDecoding {
+    let mut base_name: Option<String> = None;
+    let mut differences: Vec<(u8, String)> = Vec::new();
+    let mut identity = false;
+    if let Some(enc) = fd.get(b"Encoding").ok().and_then(|o| resolve(doc, o).ok()) {
+        match enc {
+            Object::Name(name) => {
+                let name = String::from_utf8_lossy(name).into_owned();
+                if name == "Identity-H" || name == "Identity-V" {
+                    identity = true;
+                } else {
+                    base_name = Some(name);
+                }
+            }
+            Object::Dictionary(dict) => {
+                base_name = dict
+                    .get(b"BaseEncoding")
+                    .ok()
+                    .and_then(|o| resolve(doc, o).ok())
+                    .map(obj_name_string);
+                if let Some(Object::Array(items)) = dict
+                    .get(b"Differences")
+                    .ok()
+                    .and_then(|o| resolve(doc, o).ok())
+                {
+                    differences = parse_differences(items);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut decoding = match (subtype, base_name) {
+        (_, Some(name)) => FontDecoding::with_base_encoding(&name),
+        ("Type1" | "MMType1", None) => FontDecoding::with_base_encoding("Standard"),
+        _ => FontDecoding::default(),
+    };
+    if !differences.is_empty() {
+        decoding.apply_differences(&differences);
+    }
+    if let Some(Object::Stream(stream)) =
+        fd.get(b"ToUnicode").ok().and_then(|o| resolve(doc, o).ok())
+    {
+        if let Ok(bytes) = stream_bytes(stream) {
+            decoding.apply_tounicode(&parse_tounicode_cmap(&bytes));
+        }
+    }
+    if identity {
+        decoding.set_two_byte();
+    }
+    decoding
+}
+
+/// Parse a `/Differences` array into (code, glyph-name) pairs.
+fn parse_differences(items: &[Object]) -> Vec<(u8, String)> {
+    let mut out = Vec::new();
+    let mut code: u32 = 0;
+    for item in items {
+        match item {
+            Object::Integer(n) => code = (*n).max(0) as u32,
+            Object::Name(name) => {
+                if code <= 255 {
+                    out.push((code as u8, String::from_utf8_lossy(name).into_owned()));
+                }
+                code += 1;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Pre-resolved XObjects: named forms + named image dimensions.
+type XObjectMaps = (
+    HashMap<String, Arc<FormXObject>>,
+    HashMap<String, (u32, u32)>,
+);
+
+/// Pre-resolve a page's XObjects: forms (ops + scoped resources + matrix)
+/// and images (dimensions; bboxes come from the CTM at `Do` time).
+fn collect_xobjects(
+    doc: &Document,
+    page: &lopdf::Dictionary,
+    page_fonts: &BTreeMap<String, FontInfo>,
+) -> XObjectMaps {
+    let resources = page
+        .get(b"Resources")
+        .ok()
+        .and_then(|o| resolve(doc, o).ok())
+        .and_then(|o| match o {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        });
+    let Some(resources) = resources else {
+        return (HashMap::new(), HashMap::new());
+    };
+    collect_xobjects_in(doc, resources, page_fonts, 0, &mut HashSet::new())
+}
+
+/// Recursive XObject collection with depth cap + visited set (cycle guard).
+fn collect_xobjects_in(
+    doc: &Document,
+    resources: &lopdf::Dictionary,
+    fallback_fonts: &BTreeMap<String, FontInfo>,
+    depth: u8,
+    visited: &mut HashSet<ObjectId>,
+) -> XObjectMaps {
+    let mut forms = HashMap::new();
+    let mut images = HashMap::new();
+    if depth > 4 {
+        return (forms, images);
+    }
+    let xobjects = resources
+        .get(b"XObject")
+        .ok()
+        .and_then(|o| resolve(doc, o).ok())
+        .and_then(|o| match o {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        });
+    let Some(xobjects) = xobjects else {
+        return (forms, images);
+    };
+    for (key, val) in xobjects.iter() {
+        if let Object::Reference(id) = val {
+            if !visited.insert(*id) {
+                continue;
+            }
+        }
+        let Ok(obj) = resolve(doc, val) else {
+            continue;
+        };
+        let Object::Stream(stream) = obj else {
+            continue;
+        };
+        let subtype = stream
+            .dict
+            .get(b"Subtype")
             .ok()
             .map(obj_name_string)
             .unwrap_or_default();
-        let lower = base.to_lowercase();
-        out.insert(
-            font_ref,
-            FontInfo {
-                name: if base.is_empty() {
-                    "Unknown".to_string()
-                } else {
-                    base
-                },
-                is_bold: lower.contains("bold") || lower.contains("black"),
-                is_italic: lower.contains("italic") || lower.contains("oblique"),
-                is_monospace: lower.contains("courier")
-                    || lower.contains("mono")
-                    || lower.contains("consolas")
-                    || lower.contains("menlo"),
-            },
+        let name = String::from_utf8_lossy(key).into_owned();
+        if subtype == "Image" {
+            let width = stream.dict.get(b"Width").ok().and_then(obj_u32);
+            let height = stream.dict.get(b"Height").ok().and_then(obj_u32);
+            if let (Some(width), Some(height)) = (width, height) {
+                images.insert(name, (width, height));
+            }
+            continue;
+        }
+        if subtype != "Form" {
+            continue;
+        }
+        let matrix = stream
+            .dict
+            .get(b"Matrix")
+            .ok()
+            .map(parse_matrix_6)
+            .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let form_resources = stream
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|o| resolve(doc, o).ok())
+            .and_then(|o| match o {
+                Object::Dictionary(d) => Some(d),
+                _ => None,
+            })
+            .unwrap_or(resources);
+        let mut fonts = fallback_fonts.clone();
+        if let Ok(own) = font_map_from_resources(doc, form_resources) {
+            fonts.extend(own);
+        }
+        let Ok(content_bytes) = stream_bytes(stream) else {
+            continue;
+        };
+        let Ok(content) = Content::decode(&content_bytes) else {
+            continue;
+        };
+        let (nested_forms, nested_images) =
+            collect_xobjects_in(doc, form_resources, &fonts, depth + 1, visited);
+        forms.insert(
+            name,
+            Arc::new(FormXObject {
+                matrix,
+                fonts,
+                ops: content.operations,
+                forms: nested_forms,
+                images: nested_images,
+            }),
         );
     }
-    Ok(out)
+    (forms, images)
+}
+
+/// Parse a 6-element matrix array (identity fallback per component).
+fn parse_matrix_6(obj: &Object) -> [f32; 6] {
+    match obj {
+        Object::Array(items) if items.len() == 6 => {
+            let mut m = [0.0f32; 6];
+            for (i, item) in items.iter().enumerate() {
+                let identity = if i == 0 || i == 3 { 1.0 } else { 0.0 };
+                m[i] = obj_f32(item).unwrap_or(identity);
+            }
+            m
+        }
+        _ => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    }
+}
+
+fn obj_u32(obj: &Object) -> Option<u32> {
+    match obj {
+        Object::Integer(v) => Some((*v).max(0) as u32),
+        _ => None,
+    }
 }
 
 /// Concatenate (and decompress when needed) a page's content streams.
@@ -291,6 +570,49 @@ fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>> {
 // Content-stream walker
 // ---------------------------------------------------------------------------
 
+/// Pre-resolved Form XObject with its own resource namespace.
+struct FormXObject {
+    matrix: [f32; 6],
+    fonts: BTreeMap<String, FontInfo>,
+    ops: Vec<Operation>,
+    forms: HashMap<String, Arc<FormXObject>>,
+    images: HashMap<String, (u32, u32)>,
+}
+
+/// Graphics state saved by `q`, restored by `Q`.
+#[derive(Clone, Copy)]
+struct GraphicsState {
+    ctm: [f32; 6],
+    line_width: f32,
+}
+
+/// Resource namespace saved across `Do` (forms have scoped resources).
+struct ResourceScope {
+    fonts: BTreeMap<String, FontInfo>,
+    forms: HashMap<String, Arc<FormXObject>>,
+    images: HashMap<String, (u32, u32)>,
+}
+
+/// Max `Do` recursion depth (cycle guard on top of the visited set).
+const MAX_FORM_DEPTH: u8 = 8;
+
+/// Transform a point by a 6-element matrix (row-vector convention).
+fn transform_point(m: &[f32; 6], x: f32, y: f32) -> (f32, f32) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+/// Concatenate: CTM' = M × CTM (3×3 row-vector multiply).
+fn concat_matrix(ctm: [f32; 6], m: [f32; 6]) -> [f32; 6] {
+    [
+        m[0] * ctm[0] + m[1] * ctm[2],
+        m[0] * ctm[1] + m[1] * ctm[3],
+        m[2] * ctm[0] + m[3] * ctm[2],
+        m[2] * ctm[1] + m[3] * ctm[3],
+        m[4] * ctm[0] + m[5] * ctm[2] + ctm[4],
+        m[4] * ctm[1] + m[5] * ctm[3] + ctm[5],
+    ]
+}
+
 struct WalkState {
     origin_x: f32,
     top_y: f32,
@@ -299,17 +621,36 @@ struct WalkState {
     font_size: f32,
     tx: f32,
     ty: f32,
+    /// Line-matrix origin: Td/T* offset from here (not from the Tj cursor).
+    tlx: f32,
+    tly: f32,
     leading: f32,
     line_width: f32,
     cur_x: f32,
     cur_y: f32,
     has_point: bool,
+    pending_rects: Vec<[f32; 4]>,
     spans: Vec<TextSpan>,
     vectors: Vec<VectorSegment>,
+    filled_rects: Vec<BBox>,
+    fallback_decoding: FontDecoding,
+    ctm: [f32; 6],
+    tm_lin: [f32; 4],
+    gstack: Vec<GraphicsState>,
+    forms: HashMap<String, Arc<FormXObject>>,
+    images: HashMap<String, (u32, u32)>,
+    scope_stack: Vec<ResourceScope>,
+    image_bboxes: Vec<BBox>,
 }
 
 impl WalkState {
-    fn new(origin_x: f32, top_y: f32, fonts: BTreeMap<String, FontInfo>) -> Self {
+    fn new(
+        origin_x: f32,
+        top_y: f32,
+        fonts: BTreeMap<String, FontInfo>,
+        forms: HashMap<String, Arc<FormXObject>>,
+        images: HashMap<String, (u32, u32)>,
+    ) -> Self {
         Self {
             origin_x,
             top_y,
@@ -318,21 +659,41 @@ impl WalkState {
             font_size: 12.0,
             tx: 0.0,
             ty: 0.0,
+            tlx: 0.0,
+            tly: 0.0,
             leading: 0.0,
             line_width: 1.0,
             cur_x: 0.0,
             cur_y: 0.0,
             has_point: false,
+            pending_rects: Vec::new(),
             spans: Vec::new(),
             vectors: Vec::new(),
+            filled_rects: Vec::new(),
+            fallback_decoding: FontDecoding::default(),
+            ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            tm_lin: [1.0, 0.0, 0.0, 1.0],
+            gstack: Vec::new(),
+            forms,
+            images,
+            scope_stack: Vec::new(),
+            image_bboxes: Vec::new(),
         }
     }
 
     fn apply(&mut self, op: &lopdf::content::Operation) {
+        self.apply_with_depth(op, 0);
+    }
+
+    fn apply_with_depth(&mut self, op: &lopdf::content::Operation, depth: u8) {
         match op.operator.as_str() {
             "BT" => {
+                // BT resets the text matrix (but not the font/size).
                 self.tx = 0.0;
                 self.ty = 0.0;
+                self.tlx = 0.0;
+                self.tly = 0.0;
+                self.tm_lin = [1.0, 0.0, 0.0, 1.0];
             }
             "ET" => {}
             "Tf" => {
@@ -350,29 +711,50 @@ impl WalkState {
             }
             "Tm" => {
                 if op.operands.len() >= 6 {
+                    let a = obj_f32(&op.operands[0]).unwrap_or(1.0);
+                    let b = obj_f32(&op.operands[1]).unwrap_or(0.0);
+                    let c = obj_f32(&op.operands[2]).unwrap_or(0.0);
+                    let d = obj_f32(&op.operands[3]).unwrap_or(1.0);
                     if let (Some(e), Some(f)) = (obj_f32(&op.operands[4]), obj_f32(&op.operands[5]))
                     {
+                        self.tm_lin = [a, b, c, d];
                         self.tx = e;
                         self.ty = f;
+                        self.tlx = e;
+                        self.tly = f;
                     }
                 }
             }
             "Td" => {
                 if op.operands.len() >= 2 {
-                    self.tx += obj_f32(&op.operands[0]).unwrap_or(0.0);
-                    self.ty += obj_f32(&op.operands[1]).unwrap_or(0.0);
+                    let (dx, dy) = self.transform_text_offset(
+                        obj_f32(&op.operands[0]).unwrap_or(0.0),
+                        obj_f32(&op.operands[1]).unwrap_or(0.0),
+                    );
+                    self.tlx += dx;
+                    self.tly += dy;
+                    self.tx = self.tlx;
+                    self.ty = self.tly;
                 }
             }
             "TD" => {
                 if op.operands.len() >= 2 {
-                    let dy = obj_f32(&op.operands[1]).unwrap_or(0.0);
-                    self.tx += obj_f32(&op.operands[0]).unwrap_or(0.0);
-                    self.ty += dy;
-                    self.leading = -dy;
+                    let raw_dy = obj_f32(&op.operands[1]).unwrap_or(0.0);
+                    let (dx, dy) =
+                        self.transform_text_offset(obj_f32(&op.operands[0]).unwrap_or(0.0), raw_dy);
+                    self.tlx += dx;
+                    self.tly += dy;
+                    self.tx = self.tlx;
+                    self.ty = self.tly;
+                    self.leading = -raw_dy;
                 }
             }
             "T*" => {
-                self.ty -= self.leading;
+                let (dx, dy) = self.transform_text_offset(0.0, -self.leading);
+                self.tlx += dx;
+                self.tly += dy;
+                self.tx = self.tlx;
+                self.ty = self.tly;
             }
             "TL" => {
                 if let Some(v) = op.operands.first().and_then(obj_f32) {
@@ -381,7 +763,7 @@ impl WalkState {
             }
             "Tj" => {
                 if let Some(obj) = op.operands.first() {
-                    let text = obj_text_string(obj);
+                    let text = self.decode_operand(obj);
                     self.emit_text(&text);
                 }
             }
@@ -390,7 +772,7 @@ impl WalkState {
                     let mut text = String::new();
                     for item in items {
                         match item {
-                            Object::String(_, _) => text.push_str(&obj_text_string(item)),
+                            Object::String(_, _) => text.push_str(&self.decode_operand(item)),
                             // Large negative kerns usually separate words.
                             n if obj_f32(n).is_some_and(|k| k < -150.0)
                                 && !text.ends_with(char::is_whitespace) =>
@@ -406,15 +788,43 @@ impl WalkState {
             "'" => {
                 self.ty -= self.leading;
                 if let Some(obj) = op.operands.first() {
-                    let text = obj_text_string(obj);
+                    let text = self.decode_operand(obj);
                     self.emit_text(&text);
                 }
             }
             "\"" => {
                 self.ty -= self.leading;
                 if op.operands.len() >= 3 {
-                    let text = obj_text_string(&op.operands[2]);
+                    let text = self.decode_operand(&op.operands[2]);
                     self.emit_text(&text);
+                }
+            }
+            "q" => {
+                self.gstack.push(GraphicsState {
+                    ctm: self.ctm,
+                    line_width: self.line_width,
+                });
+            }
+            "Q" => {
+                if let Some(saved) = self.gstack.pop() {
+                    self.ctm = saved.ctm;
+                    self.line_width = saved.line_width;
+                }
+            }
+            "cm" => {
+                if op.operands.len() >= 6 {
+                    let mut m = [0.0f32; 6];
+                    for (i, operand) in op.operands.iter().take(6).enumerate() {
+                        m[i] = obj_f32(operand).unwrap_or(0.0);
+                    }
+                    self.ctm = concat_matrix(self.ctm, m);
+                }
+            }
+            "Do" => {
+                if depth < MAX_FORM_DEPTH {
+                    if let Some(name) = op.operands.first().map(obj_name_string) {
+                        self.invoke_xobject(name.trim_start_matches('/'), depth);
+                    }
                 }
             }
             "w" => {
@@ -427,6 +837,9 @@ impl WalkState {
                     self.cur_x = obj_f32(&op.operands[0]).unwrap_or(0.0);
                     self.cur_y = obj_f32(&op.operands[1]).unwrap_or(0.0);
                     self.has_point = true;
+                    // A new subpath abandons pure-rect tracking (under-counts
+                    // exotic mixed paths rather than leaking stale rects).
+                    self.pending_rects.clear();
                 }
             }
             "l" => {
@@ -443,49 +856,168 @@ impl WalkState {
                 let y = obj_f32(&op.operands[1]).unwrap_or(0.0);
                 let w = obj_f32(&op.operands[2]).unwrap_or(0.0);
                 let h = obj_f32(&op.operands[3]).unwrap_or(0.0);
-                self.emit_vector(x, y, x + w, y);
-                self.emit_vector(x + w, y, x + w, y + h);
-                self.emit_vector(x + w, y + h, x, y + h);
-                self.emit_vector(x, y + h, x, y);
+                // Deferred: stroke vs fill is decided by the paint op.
+                self.pending_rects.push([x, y, w, h]);
+            }
+            "S" | "s" => {
+                let rects = std::mem::take(&mut self.pending_rects);
+                self.stroke_rects(&rects);
+            }
+            "f" | "F" | "f*" => {
+                let rects = std::mem::take(&mut self.pending_rects);
+                self.fill_rects(&rects);
+            }
+            "B" | "B*" | "b" | "b*" => {
+                // Drain once, apply to both: fill must not starve stroke.
+                let rects = std::mem::take(&mut self.pending_rects);
+                self.fill_rects(&rects);
+                self.stroke_rects(&rects);
+            }
+            "n" => {
+                self.pending_rects.clear();
             }
             _ => {}
         }
+    }
+
+    /// Text-space offset → user-space offset through the Tm linear part.
+    fn transform_text_offset(&self, dx: f32, dy: f32) -> (f32, f32) {
+        let [a, b, c, d] = self.tm_lin;
+        (a * dx + c * dy, b * dx + d * dy)
+    }
+
+    /// Effective font size: Tf × |CTM × Tm × x-axis| (exact under any mix
+    /// of text scaling and CTM transforms; 1.0 scale when both identity).
+    fn effective_scale(&self) -> f32 {
+        let [a, b, _, _] = self.tm_lin;
+        let rx = self.ctm[0] * a + self.ctm[2] * b;
+        let ry = self.ctm[1] * a + self.ctm[3] * b;
+        rx.hypot(ry).max(0.001)
+    }
+
+    /// Execute a Form XObject (scoped resources + matrix) or record an image.
+    fn invoke_xobject(&mut self, name: &str, depth: u8) {
+        if self.images.contains_key(name) {
+            // Images render into the unit square mapped by the CTM.
+            let (x0, y0) = transform_point(&self.ctm, 0.0, 0.0);
+            let (x1, y1) = transform_point(&self.ctm, 1.0, 1.0);
+            let (lx, hx) = (x0.min(x1), x0.max(x1));
+            let (ly, hy) = (y0.min(y1), y0.max(y1));
+            self.image_bboxes.push(BBox::new(
+                lx - self.origin_x,
+                self.top_y - hy,
+                hx - self.origin_x,
+                self.top_y - ly,
+            ));
+            return;
+        }
+        let form = self.forms.get(name).cloned();
+        let Some(form) = form else {
+            return;
+        };
+        self.scope_stack.push(ResourceScope {
+            fonts: std::mem::take(&mut self.fonts),
+            forms: std::mem::take(&mut self.forms),
+            images: std::mem::take(&mut self.images),
+        });
+        self.fonts.clone_from(&form.fonts);
+        self.forms.clone_from(&form.forms);
+        self.images.clone_from(&form.images);
+        let saved_ctm = self.ctm;
+        self.ctm = concat_matrix(self.ctm, form.matrix);
+        for op in &form.ops {
+            self.apply_with_depth(op, depth + 1);
+        }
+        self.ctm = saved_ctm;
+        if let Some(scope) = self.scope_stack.pop() {
+            self.fonts = scope.fonts;
+            self.forms = scope.forms;
+            self.images = scope.images;
+        }
+    }
+
+    /// Decode a text-showing operand through the current font (NFKC-normalized).
+    fn decode_operand(&self, obj: &Object) -> String {
+        let bytes = obj_text_bytes(obj);
+        if bytes.is_empty() {
+            return String::new();
+        }
+        self.fonts
+            .get(&self.font_ref)
+            .map(|info| &info.decoding)
+            .unwrap_or(&self.fallback_decoding)
+            .decode(&bytes)
     }
 
     fn emit_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
-        let info = self.fonts.get(&self.font_ref).cloned().unwrap_or_default();
-        let font_name = if info.name.is_empty() {
-            "Unknown".to_string()
-        } else {
-            info.name.clone()
+        // Borrow font metadata: cloning FontInfo per span copies its whole
+        // decoding tables (HashMap + 256-entry byte map).
+        let font_name: String;
+        let (is_bold, is_italic, is_monospace): (bool, bool, bool);
+        match self.fonts.get(&self.font_ref) {
+            Some(info) => {
+                font_name = if info.name.is_empty() {
+                    "Unknown".to_string()
+                } else {
+                    info.name.clone()
+                };
+                is_bold = info.is_bold;
+                is_italic = info.is_italic;
+                is_monospace = info.is_monospace;
+            }
+            None => {
+                font_name = "Unknown".to_string();
+                is_bold = false;
+                is_italic = false;
+                is_monospace = false;
+            }
         };
         let w = estimate_width(text, self.font_size);
         let h = self.font_size;
+        // Text-space run/rise through Tm, then CTM, then flip + union.
+        let [a, b, c, d] = self.tm_lin;
+        let (mut lx, mut ly) = (f32::INFINITY, f32::INFINITY);
+        let (mut hx, mut hy) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for (ox, oy) in [
+            (0.0, 0.0),
+            (a * w, b * w),
+            (c * h, d * h),
+            (a * w + c * h, b * w + d * h),
+        ] {
+            let (ux, uy) = transform_point(&self.ctm, self.tx + ox, self.ty + oy);
+            lx = lx.min(ux);
+            ly = ly.min(uy);
+            hx = hx.max(ux);
+            hy = hy.max(uy);
+        }
         let bbox = BBox::new(
-            self.tx - self.origin_x,
-            self.top_y - (self.ty + h),
-            self.tx + w - self.origin_x,
-            self.top_y - self.ty,
+            lx - self.origin_x,
+            self.top_y - hy,
+            hx - self.origin_x,
+            self.top_y - ly,
         );
         self.spans.push(TextSpan {
             text: text.to_string(),
             bbox,
             font_name,
-            font_size: self.font_size,
-            is_bold: info.is_bold,
-            is_italic: info.is_italic,
-            is_monospace: info.is_monospace,
+            font_size: self.font_size * self.effective_scale(),
+            is_bold,
+            is_italic,
+            is_monospace,
         });
-        // Advance the text position for subsequent Tj in the same BT block.
-        self.tx += w;
+        // Advance along the run direction for subsequent Tj in the block.
+        self.tx += a * w;
+        self.ty += b * w;
     }
 
     fn emit_vector(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
-        let (lx, hx) = (x0.min(x1), x0.max(x1));
-        let (ly, hy) = (y0.min(y1), y0.max(y1));
+        let (ax, ay) = transform_point(&self.ctm, x0, y0);
+        let (bx, by) = transform_point(&self.ctm, x1, y1);
+        let (lx, hx) = (ax.min(bx), ax.max(bx));
+        let (ly, hy) = (ay.min(by), ay.max(by));
         self.vectors.push(VectorSegment {
             x0: lx - self.origin_x,
             y0: self.top_y - hy,
@@ -493,6 +1025,35 @@ impl WalkState {
             y1: self.top_y - ly,
             stroke_width: self.line_width,
         });
+    }
+
+    /// Stroke the given `re` rects as 4 segments each.
+    fn stroke_rects(&mut self, rects: &[[f32; 4]]) {
+        for &[x, y, w, h] in rects {
+            self.emit_vector(x, y, x + w, y);
+            self.emit_vector(x + w, y, x + w, y + h);
+            self.emit_vector(x + w, y + h, x, y + h);
+            self.emit_vector(x, y + h, x, y);
+        }
+    }
+
+    /// Record the given `re` rects as filled bboxes (CTM-transformed).
+    fn fill_rects(&mut self, rects: &[[f32; 4]]) {
+        for &[x, y, w, h] in rects {
+            let (ax, ay) = transform_point(&self.ctm, x, y);
+            let (bx, by) = transform_point(&self.ctm, x + w, y + h);
+            let (lx, hx) = (ax.min(bx), ax.max(bx));
+            let (ly, hy) = (ay.min(by), ay.max(by));
+            if hx - lx < 0.5 || hy - ly < 0.5 {
+                continue; // degenerate sliver, not a shaded cell
+            }
+            self.filled_rects.push(BBox::new(
+                lx - self.origin_x,
+                self.top_y - hy,
+                hx - self.origin_x,
+                self.top_y - ly,
+            ));
+        }
     }
 }
 
@@ -509,12 +1070,12 @@ fn obj_f32(obj: &Object) -> Option<f32> {
     }
 }
 
-/// Decode a text-showing operand to a Rust string.
-fn obj_text_string(obj: &Object) -> String {
+/// Raw bytes of a text-showing operand.
+fn obj_text_bytes(obj: &Object) -> Vec<u8> {
     match obj {
-        Object::String(bytes, _) => String::from_utf8_lossy(bytes).into_owned(),
-        Object::Name(bytes) => String::from_utf8_lossy(bytes).into_owned(),
-        _ => String::new(),
+        Object::String(bytes, _) => bytes.clone(),
+        Object::Name(bytes) => bytes.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -646,5 +1207,103 @@ mod tests {
         assert_eq!(ascii85_decode(b"<~87cURDZ~>").unwrap(), b"Hello");
         assert!(ascii85_decode(b"v").is_err()); // dangling 1-char group
         assert!(ascii85_decode(b"\x01").is_err());
+    }
+
+    #[test]
+    fn extracts_tounicode_font() {
+        let pdf = test_fixtures::tounicode_font_pdf();
+        let p = extract_page(&pdf, 0).expect("extract");
+        assert_eq!(p.spans.len(), 2);
+        // 0x02 via Differences + ToUnicode (U+FB01, NFKC → "fi").
+        assert_eq!(p.spans[0].text, "figures");
+        // 0x13 via Differences + AGL alone (U+FB02, NFKC → "fl").
+        assert_eq!(p.spans[1].text, "aflow");
+    }
+
+    #[test]
+    fn matrix_concat_orders_transforms() {
+        let id = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let scale2 = [2.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+        let shift = [1.0, 0.0, 0.0, 1.0, 10.0, 0.0];
+        assert_eq!(concat_matrix(id, scale2), scale2);
+        // cm scale, then cm translate: the shift applies in scaled space.
+        let both = concat_matrix(concat_matrix(id, scale2), shift);
+        assert_eq!(both, [2.0, 0.0, 0.0, 2.0, 20.0, 0.0]);
+        assert_eq!(transform_point(&both, 5.0, 5.0), (30.0, 10.0));
+    }
+
+    #[test]
+    fn matrix_parse_falls_back_to_identity() {
+        assert_eq!(
+            parse_matrix_6(&Object::Array(vec![
+                Object::Integer(2),
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(2),
+                Object::Integer(5),
+                Object::Integer(6),
+            ])),
+            [2.0, 0.0, 0.0, 2.0, 5.0, 6.0]
+        );
+        assert_eq!(
+            parse_matrix_6(&Object::Name(b"nope".to_vec())),
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn extracts_xobject_form() {
+        let pdf = test_fixtures::xobject_form_pdf();
+        let p = extract_page(&pdf, 0).expect("extract");
+        assert_eq!(p.spans.len(), 3);
+
+        let direct = &p.spans[0];
+        assert_eq!(direct.text, "Direct text");
+        assert!((direct.bbox.x0 - 72.0).abs() < 0.05);
+        assert!((direct.bbox.y0 - 100.0).abs() < 0.05);
+
+        // Form text at form-space (10,700) + cm translate (100,50).
+        let form = p.spans.iter().find(|s| s.text == "Form text").unwrap();
+        assert!((form.bbox.x0 - 110.0).abs() < 0.05);
+        assert!((form.bbox.y0 - 31.0).abs() < 0.05);
+
+        // Rotated span: corners (300,400)..(289,424.2) in user space.
+        let spun = p.spans.iter().find(|s| s.text == "Spun").unwrap();
+        assert!((spun.bbox.x0 - 289.0).abs() < 0.1);
+        assert!((spun.bbox.y0 - 367.8).abs() < 0.1);
+
+        // Image unit square through scale(10) + translate(72,500).
+        assert_eq!(p.image_bboxes.len(), 1);
+        let img = &p.image_bboxes[0];
+        assert!((img.x0 - 72.0).abs() < 0.05);
+        assert!((img.y0 - 282.0).abs() < 0.05);
+        assert!((img.x1 - 82.0).abs() < 0.05);
+        assert!((img.y1 - 292.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn extracts_td_relative_lines_without_drift() {
+        let pdf = test_fixtures::td_relative_pdf();
+        let p = extract_page(&pdf, 0).expect("extract");
+        assert_eq!(p.spans.len(), 4);
+        for span in &p.spans {
+            assert!((span.bbox.x0 - 72.0).abs() < 0.05, "{:?}", span.text);
+        }
+        assert!((p.spans[0].bbox.y0 - 101.0).abs() < 0.05);
+        assert!((p.spans[1].bbox.y0 - 113.0).abs() < 0.05);
+        assert!((p.spans[2].bbox.y0 - 181.0).abs() < 0.05);
+        assert!((p.spans[3].bbox.y0 - 193.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn extracts_rect_strokes_and_fills() {
+        let pdf = test_fixtures::fill_stroke_pdf();
+        let p = extract_page(&pdf, 0).expect("extract");
+        assert_eq!(p.vectors.len(), 8);
+        assert_eq!(p.filled_rects.len(), 2);
+        assert!((p.filled_rects[0].x0 - 200.0).abs() < 0.05);
+        assert!((p.filled_rects[0].y0 - 142.0).abs() < 0.05);
+        assert!((p.filled_rects[1].x0 - 330.0).abs() < 0.05);
+        assert!((p.filled_rects[1].y1 - 192.0).abs() < 0.05);
     }
 }

@@ -1,5 +1,6 @@
 //! PDFium/lopdf raw char, font, & vector extraction.
 
+pub mod fonts;
 pub mod lopdf_fallback;
 pub mod pdfium_backend;
 

@@ -43,6 +43,8 @@ pub struct RawPageElements {
     pub spans: Vec<TextSpan>,
     pub vectors: Vec<VectorSegment>,
     pub image_bboxes: Vec<BBox>,
+    /// Filled rectangles (`re` + fill paint): shaded cells, heatmaps.
+    pub filled_rects: Vec<BBox>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

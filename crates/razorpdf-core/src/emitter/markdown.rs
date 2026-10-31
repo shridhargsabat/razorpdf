@@ -37,6 +37,7 @@ pub fn blocks_to_markdown(blocks: &[LayoutBlock]) -> String {
                     bbox: b.bbox,
                     rows: rows.clone(),
                     has_header: *has_header,
+                    source: crate::geometry::TableSource::VectorGrid,
                 };
                 out.push_str(&crate::geometry::table_grid::detected_table_to_markdown(
                     &table,

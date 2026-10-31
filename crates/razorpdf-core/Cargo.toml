@@ -23,6 +23,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+unicode-normalization = "0.1"
 tracing.workspace = true
 tokio.workspace = true
 rayon.workspace = true

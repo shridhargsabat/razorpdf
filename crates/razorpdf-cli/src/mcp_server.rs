@@ -206,7 +206,14 @@ async fn tool_inspect_pdf_layout(args: &Value) -> Result<String, String> {
     let mut out = Vec::new();
     for page in &pages {
         let lines = geometry::merge_spans_to_lines(&page.spans);
-        let tables = geometry::detect_vector_tables(&page.vectors, &page.spans);
+        let median_font = geometry::body_font_size(&lines);
+        let tables = geometry::detect_all_tables(
+            &page.vectors,
+            &page.spans,
+            &lines,
+            median_font,
+            &page.filled_rects,
+        );
         let verdict = triage::score_page(page, &config);
         out.push(json!({
             "page_index": page.page_index,
@@ -242,11 +249,20 @@ async fn tool_extract_pdf_tables(args: &Value) -> Result<String, String> {
     let mut tables_out = Vec::new();
 
     for page in &pages {
-        for table in geometry::detect_vector_tables(&page.vectors, &page.spans) {
+        let lines = geometry::merge_spans_to_lines(&page.spans);
+        let median_font = geometry::body_font_size(&lines);
+        for table in geometry::detect_all_tables(
+            &page.vectors,
+            &page.spans,
+            &lines,
+            median_font,
+            &page.filled_rects,
+        ) {
             tables_out.push(json!({
                 "page_index": page.page_index,
                 "bbox": table.bbox,
                 "source": "deterministic",
+                "method": table.source.as_str(),
                 "rows": table.rows,
                 "has_header": table.has_header,
                 "markdown": geometry::table_grid::detected_table_to_markdown(&table),

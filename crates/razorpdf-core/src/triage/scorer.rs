@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rstar::{RTree, RTreeObject, AABB};
 
 use crate::config::ParserConfig;
-use crate::geometry::lines::{median_font_size, merge_spans_to_lines, TextLine};
+use crate::geometry::lines::{body_font_size, merge_spans_to_lines, TextLine};
 use crate::models::{BBox, RawPageElements, TextSpan, TriageReason, VectorSegment};
 
 /// Overlap predicate for ρ_overlap involvement.
@@ -95,7 +95,7 @@ pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> PageTriage {
     }
 
     let lines = merge_spans_to_lines(&page.spans);
-    let med_font = median_font_size(&lines).max(1.0);
+    let med_font = body_font_size(&lines).max(1.0);
     let involved = overlap_involvement(&page.spans);
     let runs = entropy_runs(&lines, med_font);
     let diagrams = diagram_clusters(&page.vectors);
@@ -114,6 +114,7 @@ pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> PageTriage {
             bbox: run.bbox,
             has_entropy: true,
             has_overlap: false,
+            has_diagram: false,
         });
     }
     for cluster in overlap_clusters(&page.spans, &involved) {
@@ -121,6 +122,15 @@ pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> PageTriage {
             bbox: cluster,
             has_entropy: false,
             has_overlap: true,
+            has_diagram: false,
+        });
+    }
+    for bbox in diagrams {
+        signals.push(Signal {
+            bbox,
+            has_entropy: false,
+            has_overlap: false,
+            has_diagram: true,
         });
     }
     let merged = merge_signals(signals, med_font * SIGNAL_MERGE_FONT_MULT);
@@ -141,13 +151,16 @@ pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> PageTriage {
             let rho_t = f32::from(m.has_entropy);
             let rho_v = vector_noise_ratio(&page.vectors, &page.spans, Some(&m.bbox));
             let score = complexity_score(rho_o, rho_t, rho_v);
-            if score < config.triage_threshold {
+            // Diagrams trip structurally (a pure chart has no text to score).
+            if score < config.triage_threshold && !m.has_diagram {
                 return None;
             }
             let reason = if m.has_entropy {
                 TriageReason::BorderlessIrregularTable
-            } else {
+            } else if m.has_overlap {
                 TriageReason::OverlappingSpans
+            } else {
+                TriageReason::ComplexMathOrDiagram
             };
             Some(FallbackRegion {
                 content_bbox: m.bbox,
@@ -160,20 +173,6 @@ pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> PageTriage {
         })
         .collect();
 
-    // Structural rule 2: diagram clusters trip regardless of S(R).
-    for bbox in diagrams {
-        let score = complexity_score(
-            involvement_rate(&involved, None).min(1.0),
-            0.0,
-            vector_noise_ratio(&page.vectors, &page.spans, Some(&bbox)),
-        );
-        regions.push(FallbackRegion {
-            content_bbox: bbox,
-            bbox: bbox.pad_clamped(config.vlm_region_pad_pt, page.width, page.height),
-            reason: TriageReason::ComplexMathOrDiagram,
-            score,
-        });
-    }
     regions.sort_by(|a, b| {
         a.content_bbox
             .y0
@@ -525,6 +524,7 @@ struct Signal {
     bbox: BBox,
     has_entropy: bool,
     has_overlap: bool,
+    has_diagram: bool,
 }
 
 /// Greedily merge signals with vertical gap below `merge_dist` and nonzero
@@ -569,6 +569,7 @@ fn merge_pass(signals: Vec<Signal>, merge_dist: f32) -> Vec<Signal> {
                 m.bbox = m.bbox.union(&sig.bbox);
                 m.has_entropy |= sig.has_entropy;
                 m.has_overlap |= sig.has_overlap;
+                m.has_diagram |= sig.has_diagram;
                 placed = true;
                 break;
             }
@@ -655,6 +656,7 @@ mod tests {
             spans,
             vectors,
             image_bboxes: Vec::new(),
+            filled_rects: Vec::new(),
         }
     }
 
@@ -761,6 +763,35 @@ mod tests {
             .map(|i| diag(100.0 + i as f32 * 5.0, 100.0))
             .collect();
         assert_eq!(diagram_clusters(&five).len(), 1);
+    }
+
+    #[test]
+    fn nearby_diagram_clusters_merge() {
+        let cluster = |oy: f32| {
+            (0..4)
+                .map(|i| VectorSegment {
+                    x0: 100.0 + i as f32 * 5.0,
+                    y0: oy,
+                    x1: 100.0 + i as f32 * 5.0 + 40.0,
+                    y1: oy + 30.0,
+                    stroke_width: 1.0,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Anchor text sets a body-size merge distance (~33pt).
+        let anchor = || span("body text here", 72.0, 500.0, 300.0, 511.0);
+        let mut near = cluster(100.0);
+        near.extend(cluster(140.0)); // 10pt vertical gap
+        let verdict = score_page(&page(vec![anchor()], near), &ParserConfig::default());
+        assert_eq!(verdict.fallback_regions.len(), 1);
+        assert!(matches!(
+            verdict.fallback_regions[0].reason,
+            TriageReason::ComplexMathOrDiagram
+        ));
+        let mut far = cluster(100.0);
+        far.extend(cluster(400.0));
+        let verdict = score_page(&page(vec![anchor()], far), &ParserConfig::default());
+        assert_eq!(verdict.fallback_regions.len(), 2);
     }
 
     #[test]

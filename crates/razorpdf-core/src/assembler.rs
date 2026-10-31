@@ -22,6 +22,10 @@ use crate::vlm::{cropper, VlmProvider, VlmRequest};
 
 /// Assemble a full document from PDF bytes.
 ///
+/// Region coverage at/above which a deterministic table suppresses a VLM
+/// region (the geometry already extracted the content: skip the VLM call).
+const TABLE_REGION_PRECEDENCE: f32 = 0.7;
+
 /// `vlm` is shared across all region completions (use [`NoVlmProvider`](crate::vlm::NoVlmProvider)
 /// for pure fast-path runs — regions stay unresolved with raw-text fallback).
 pub async fn assemble_document<P>(
@@ -36,10 +40,32 @@ where
     let started = std::time::Instant::now();
     let pages = extractor::extract_document(pdf, source_path)?;
 
-    // 1. Triage every page (fast, synchronous).
+    // 1. Triage every page (fast, synchronous). Deterministic tables take
+    // precedence over VLM regions they cover: geometry already won, so the
+    // region is dropped before any VLM call is issued.
     let triaged: Vec<PageTriage> = pages
         .iter()
-        .map(|p| triage::score_page(p, config))
+        .map(|p| {
+            let mut verdict = triage::score_page(p, config);
+            if !verdict.fallback_regions.is_empty() {
+                let lines = geometry::merge_spans_to_lines(&p.spans);
+                let tables = geometry::detect_all_tables(
+                    &p.vectors,
+                    &p.spans,
+                    &lines,
+                    geometry::body_font_size(&lines),
+                    &p.filled_rects,
+                );
+                verdict.fallback_regions.retain(|region| {
+                    let area = region.content_bbox.area().max(1.0);
+                    !tables.iter().any(|t| {
+                        t.bbox.intersection_area(&region.content_bbox) / area
+                            >= TABLE_REGION_PRECEDENCE
+                    })
+                });
+            }
+            verdict
+        })
         .collect();
     let total_pages = pages.len();
     let fast_path_pages = triaged
@@ -177,7 +203,13 @@ fn page_to_blocks(
     config: &ParserConfig,
 ) -> Vec<LayoutBlock> {
     let lines = geometry::merge_spans_to_lines(&page.spans);
-    let tables = geometry::detect_vector_tables(&page.vectors, &page.spans);
+    let tables = geometry::detect_all_tables(
+        &page.vectors,
+        &page.spans,
+        &lines,
+        geometry::body_font_size(&lines),
+        &page.filled_rects,
+    );
     let regions = &triage.fallback_regions;
     if lines.is_empty() && tables.is_empty() && regions.is_empty() {
         return Vec::new();
@@ -205,10 +237,10 @@ fn page_to_blocks(
         boxes.push(region.content_bbox);
         items.push(Item::Region(r));
     }
-    let med_font = geometry::median_font_size(&lines).max(1.0);
+    let med_font = geometry::body_font_size(&lines).max(1.0);
     let med_h = geometry::lines::median_line_height(&lines).max(1.0);
     let order = geometry::xy_cut::reading_order_with_medians(&boxes, med_font, med_h, config);
-    let median_body = geometry::median_font_size(&lines);
+    let median_body = geometry::body_font_size(&lines);
 
     let inside_region =
         |x: f32, y: f32| regions.iter().any(|r| r.content_bbox.contains_point(x, y));

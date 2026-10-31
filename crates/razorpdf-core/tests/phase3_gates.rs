@@ -28,7 +28,7 @@ fn gate3_clean_pages_take_fast_path() {
     // The bordered page IS a table — and still geometrically clean.
     let pdf = test_fixtures::bordered_table_pdf();
     let page = lopdf_fallback::extract_page(&pdf, 0).expect("extract");
-    let tables = geometry::detect_vector_tables(&page.vectors, &page.spans);
+    let tables = geometry::detect_vector_tables(&page.vectors, &page.spans, &page.filled_rects);
     assert_eq!(tables.len(), 1);
 }
 

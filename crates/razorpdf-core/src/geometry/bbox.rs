@@ -153,6 +153,19 @@ impl BBox {
         overlap / denom
     }
 
+    /// Vertical containment: `overlap_y / max(ha, hb)`. Unlike the overlap
+    /// ratio (which divides by the *min* height), this stays near zero when
+    /// a tall box (rotated watermark) merely covers a short row.
+    #[must_use]
+    pub fn vertical_containment_ratio(&self, other: &BBox) -> f32 {
+        let denom = self.height().max(other.height());
+        if denom <= f32::EPSILON {
+            return 0.0;
+        }
+        let overlap = (self.y1.min(other.y1) - self.y0.max(other.y0)).max(0.0);
+        overlap / denom
+    }
+
     /// Horizontal (1D) overlap ratio: `overlap_x / min(wa, wb)`.
     #[must_use]
     pub fn horizontal_overlap_ratio(&self, other: &BBox) -> f32 {

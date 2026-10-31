@@ -28,7 +28,7 @@ fn gate2_bordered_table_exact_markdown() {
     let pdf = test_fixtures::bordered_table_pdf();
     let page = lopdf_fallback::extract_page(&pdf, 0).expect("extract");
 
-    let tables = geometry::detect_vector_tables(&page.vectors, &page.spans);
+    let tables = geometry::detect_vector_tables(&page.vectors, &page.spans, &page.filled_rects);
     assert_eq!(tables.len(), 1);
     assert!(tables[0].has_header);
 

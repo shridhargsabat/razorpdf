@@ -226,6 +226,7 @@ mod tests {
                 stroke_width: 1.0,
             }],
             image_bboxes: Vec::new(),
+            filled_rects: Vec::new(),
         }
     }
 

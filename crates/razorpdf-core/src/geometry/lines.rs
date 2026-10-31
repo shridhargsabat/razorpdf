@@ -18,6 +18,11 @@ pub const MERGE_MAX_GAP_FONT_MULT: f32 = 2.0;
 /// double-strikes and kept on separate lines.
 pub const STACK_SPLIT_OVERLAP: f32 = 0.5;
 
+/// Minimum vertical containment (`overlap_y / max(ha, hb)`) for merging.
+/// Same-line spans score ~1.0; a tall rotated watermark covering a short
+/// row scores ~0.05 and stays on its own line.
+pub const MERGE_MIN_CONTAINMENT: f32 = 0.3;
+
 /// Default heading threshold multiplier over median body font size.
 pub const DEFAULT_HEADING_SIZE_MULT: f32 = 1.15;
 
@@ -72,9 +77,16 @@ pub fn merge_spans_to_lines_with_threshold(spans: &[TextSpan], threshold: f32) -
             let ratio = span_box.vertical_overlap_ratio(gbox);
             if ratio > threshold
                 && span_box.h_gap(gbox) <= max_gap
-                && span_box.overlap(gbox) < STACK_SPLIT_OVERLAP
+                && span_box.vertical_containment_ratio(gbox) > MERGE_MIN_CONTAINMENT
                 && best.is_none_or(|(_, r)| ratio > r)
             {
+                // Stacked double-strikes (same text re-struck) stay on
+                // separate lines; kerned fragments with distinct text merge.
+                if span_box.overlap(gbox) >= STACK_SPLIT_OVERLAP
+                    && is_double_strike(spans, &groups[gi], idx)
+                {
+                    continue;
+                }
                 best = Some((gi, ratio));
             }
         }
@@ -123,6 +135,18 @@ pub fn merge_spans_to_lines_with_threshold(spans: &[TextSpan], threshold: f32) -
 /// Merge spans into horizontal lines with the default 0.55 overlap threshold.
 pub fn merge_spans_to_lines(spans: &[TextSpan]) -> Vec<TextLine> {
     merge_spans_to_lines_with_threshold(spans, DEFAULT_LINE_MERGE_OVERLAP)
+}
+
+/// True when the span re-strikes the text of an overlapped member span.
+fn is_double_strike(spans: &[TextSpan], group: &[usize], idx: usize) -> bool {
+    let text = spans[idx].text.trim();
+    if text.is_empty() {
+        return true;
+    }
+    group.iter().any(|&m| {
+        spans[m].bbox.overlap(&spans[idx].bbox) >= STACK_SPLIT_OVERLAP
+            && spans[m].text.trim() == text
+    })
 }
 
 /// Build a [`TextLine`] from already x-sorted span indices.
@@ -199,6 +223,29 @@ pub fn median_font_size(lines: &[TextLine]) -> f32 {
     let mut sizes: Vec<f32> = lines.iter().map(|l| l.font_size).collect();
     sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     median_sorted(&sizes)
+}
+
+/// Length-weighted median font size: robust body-size estimate on pages
+/// where micro-labels (figures, scripts) outnumber body lines.
+pub fn body_font_size(lines: &[TextLine]) -> f32 {
+    if lines.is_empty() {
+        return 0.0;
+    }
+    let mut by_size: Vec<&TextLine> = lines.iter().collect();
+    by_size.sort_by(|a, b| {
+        a.font_size
+            .partial_cmp(&b.font_size)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let total: usize = lines.iter().map(|l| l.text.chars().count().max(1)).sum();
+    let mut acc = 0usize;
+    for line in by_size {
+        acc += line.text.chars().count().max(1);
+        if acc * 2 >= total {
+            return line.font_size;
+        }
+    }
+    0.0
 }
 
 /// Median line height across lines.
@@ -301,6 +348,57 @@ mod tests {
         let lines = merge_spans_to_lines(&spans);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Hello");
+    }
+
+    #[test]
+    fn tall_watermark_span_does_not_swallow_rows() {
+        // 200pt-tall rotated span covering two 10pt rows: 3 lines, not 1.
+        let spans = vec![
+            span("CONFIDENTIAL", 100.0, 200.0, 400.0, 400.0, 36.0),
+            span("Row one text", 72.0, 250.0, 300.0, 260.0, 10.0),
+            span("Row two text", 72.0, 300.0, 300.0, 310.0, 10.0),
+        ];
+        let lines = merge_spans_to_lines(&spans);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn large_inline_word_still_merges() {
+        // 24pt display word beside 10pt body (containment 0.42): one line.
+        let spans = vec![
+            span("Sale", 72.0, 100.0, 100.0, 110.0, 10.0),
+            span("50%", 105.0, 96.0, 150.0, 120.0, 24.0),
+        ];
+        let lines = merge_spans_to_lines(&spans);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn body_size_ignores_micro_labels() {
+        // 6 tiny figure labels + 2 long body lines → body size wins.
+        let mut lines = Vec::new();
+        for i in 0..6 {
+            lines.push(TextLine {
+                spans: vec![],
+                bbox: BBox::new(0.0, i as f32 * 20.0, 10.0, i as f32 * 20.0 + 3.0),
+                text: "x".to_string(),
+                font_size: 3.0,
+                is_bold: false,
+                is_monospace: false,
+            });
+        }
+        for i in 0..2 {
+            lines.push(TextLine {
+                spans: vec![],
+                bbox: BBox::new(0.0, 200.0 + i as f32 * 20.0, 400.0, 211.0 + i as f32 * 20.0),
+                text: "a reasonably long body line with many characters in it".to_string(),
+                font_size: 11.0,
+                is_bold: false,
+                is_monospace: false,
+            });
+        }
+        assert!((median_font_size(&lines) - 3.0).abs() < 1e-6);
+        assert!((body_font_size(&lines) - 11.0).abs() < 1e-6);
     }
 
     #[test]

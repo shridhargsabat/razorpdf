@@ -48,25 +48,145 @@ fn vline(x: f32, y0_top: f32, y1_top: f32, w: f32) -> String {
 
 /// Wrap content streams in an N-page PDF with shared Helvetica fonts.
 fn build_pdf_multi(page_contents: Vec<String>) -> Vec<u8> {
+    build_pdf_multi_full(
+        page_contents,
+        vec![
+            FontSpec::helvetica("F1", false),
+            FontSpec::helvetica("F2", true),
+        ],
+        Vec::new(),
+    )
+}
+
+/// A font resource: subtype, face, optional encoding + ToUnicode CMap.
+struct FontSpec {
+    resource: &'static str,
+    subtype: &'static str,
+    base_font: &'static str,
+    encoding: Option<lopdf::Dictionary>,
+    to_unicode: Option<Vec<u8>>,
+}
+
+impl FontSpec {
+    fn helvetica(resource: &'static str, bold: bool) -> Self {
+        Self {
+            resource,
+            subtype: "Type1",
+            base_font: if bold { "Helvetica-Bold" } else { "Helvetica" },
+            encoding: None,
+            to_unicode: None,
+        }
+    }
+}
+
+/// Build a `/Differences` encoding dictionary from (code, glyph-name) pairs.
+fn differences_dict(entries: &[(i64, &str)]) -> lopdf::Dictionary {
+    let mut items = Vec::with_capacity(entries.len() * 2);
+    for (code, name) in entries {
+        items.push(Object::Integer(*code));
+        items.push(Object::Name(name.as_bytes().to_vec()));
+    }
+    let mut dict = lopdf::Dictionary::new();
+    dict.set("Type", Object::Name(b"Encoding".to_vec()));
+    dict.set("Differences", Object::Array(items));
+    dict
+}
+
+/// A page-level XObject: Form (ops + matrix) or Image (pixels).
+enum XObjectSpec {
+    Form {
+        name: &'static str,
+        matrix: [f32; 6],
+        content: String,
+    },
+    Image {
+        name: &'static str,
+        width: i64,
+        height: i64,
+        data: Vec<u8>,
+    },
+}
+
+/// Wrap content streams in an N-page PDF with explicit fonts + XObjects.
+fn build_pdf_multi_full(
+    page_contents: Vec<String>,
+    fonts: Vec<FontSpec>,
+    xobjects: Vec<XObjectSpec>,
+) -> Vec<u8> {
     assert!(!page_contents.is_empty(), "need at least one page");
     let mut doc = Document::with_version("1.7");
 
-    let font_reg_id = doc.add_object(Object::Dictionary(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica",
-    }));
-    let font_bold_id = doc.add_object(Object::Dictionary(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica-Bold",
-    }));
-
     let mut font_map = lopdf::Dictionary::new();
-    font_map.set("F1", Object::Reference(font_reg_id));
-    font_map.set("F2", Object::Reference(font_bold_id));
+    for spec in &fonts {
+        let mut font_dict = lopdf::Dictionary::new();
+        font_dict.set("Type", Object::Name(b"Font".to_vec()));
+        font_dict.set("Subtype", Object::Name(spec.subtype.as_bytes().to_vec()));
+        font_dict.set("BaseFont", Object::Name(spec.base_font.as_bytes().to_vec()));
+        if let Some(encoding) = &spec.encoding {
+            font_dict.set("Encoding", Object::Dictionary(encoding.clone()));
+        }
+        if let Some(cmap) = &spec.to_unicode {
+            let cmap_id = doc.add_object(Object::Stream(Stream::new(dictionary! {}, cmap.clone())));
+            font_dict.set("ToUnicode", Object::Reference(cmap_id));
+        }
+        let font_id = doc.add_object(Object::Dictionary(font_dict));
+        font_map.set(spec.resource, Object::Reference(font_id));
+    }
     let mut resources = lopdf::Dictionary::new();
     resources.set("Font", Object::Dictionary(font_map));
+    if !xobjects.is_empty() {
+        let mut xobject_map = lopdf::Dictionary::new();
+        for spec in &xobjects {
+            match spec {
+                XObjectSpec::Form {
+                    name,
+                    matrix,
+                    content,
+                } => {
+                    let mut form_dict = lopdf::Dictionary::new();
+                    form_dict.set("Type", Object::Name(b"XObject".to_vec()));
+                    form_dict.set("Subtype", Object::Name(b"Form".to_vec()));
+                    form_dict.set(
+                        "BBox",
+                        Object::Array(vec![
+                            Object::Integer(0),
+                            Object::Integer(0),
+                            Object::Integer(PAGE_W as i64),
+                            Object::Integer(PAGE_H as i64),
+                        ]),
+                    );
+                    form_dict.set(
+                        "Matrix",
+                        Object::Array(matrix.iter().map(|m| Object::Real(*m)).collect()),
+                    );
+                    form_dict.set("Resources", Object::Dictionary(resources.clone()));
+                    let form_id = doc.add_object(Object::Stream(Stream::new(
+                        form_dict,
+                        content.clone().into_bytes(),
+                    )));
+                    xobject_map.set(*name, Object::Reference(form_id));
+                }
+                XObjectSpec::Image {
+                    name,
+                    width,
+                    height,
+                    data,
+                } => {
+                    let mut img_dict = lopdf::Dictionary::new();
+                    img_dict.set("Type", Object::Name(b"XObject".to_vec()));
+                    img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+                    img_dict.set("Width", Object::Integer(*width));
+                    img_dict.set("Height", Object::Integer(*height));
+                    img_dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+                    img_dict.set("BitsPerComponent", Object::Integer(8));
+                    let img_id =
+                        doc.add_object(Object::Stream(Stream::new(img_dict, data.clone())));
+                    xobject_map.set(*name, Object::Reference(img_id));
+                }
+            }
+        }
+        resources.set("XObject", Object::Dictionary(xobject_map));
+    }
 
     let mediabox = Object::Array(vec![
         Object::Integer(0),
@@ -268,6 +388,89 @@ fn messy_content() -> String {
 /// Trips triage: full overlap involvement + column entropy (S = 0.75).
 pub fn messy_overlap_table_pdf() -> Vec<u8> {
     build_pdf_multi(vec![messy_content()])
+}
+
+/// Custom-encoded font page: TeX-style ligature codes resolved through
+/// Differences + ToUnicode (F3) and Differences + AGL alone (F4).
+/// 2 spans, 0 vectors.
+pub fn tounicode_font_pdf() -> Vec<u8> {
+    let mut content = String::new();
+    content.push_str(&text("F3", 11.0, 72.0, 100.0, "\x02gures"));
+    content.push_str(&text("F4", 11.0, 72.0, 120.0, "a\x13ow"));
+    build_pdf_multi_full(
+        vec![content],
+        vec![
+            FontSpec::helvetica("F1", false),
+            FontSpec::helvetica("F2", true),
+            FontSpec {
+                resource: "F3",
+                subtype: "Type1",
+                base_font: "TeXSubset",
+                encoding: Some(differences_dict(&[(2, "fi")])),
+                to_unicode: Some(
+                    b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n1 beginbfchar\n<02> <FB01>\nendbfchar\n"
+                        .to_vec(),
+                ),
+            },
+            FontSpec {
+                resource: "F4",
+                subtype: "Type1",
+                base_font: "TeXSubsetTwo",
+                encoding: Some(differences_dict(&[(0x13, "fl")])),
+                to_unicode: None,
+            },
+        ],
+        Vec::new(),
+    )
+}
+
+/// Form XObject + image + rotated text: translated form content, image bbox
+/// from the CTM, rotation-tolerant span bbox. 3 spans, 1 image, 0 vectors.
+pub fn xobject_form_pdf() -> Vec<u8> {
+    let mut content = String::new();
+    content.push_str(&text("F1", 11.0, 72.0, 100.0, "Direct text"));
+    content.push_str("q 1 0 0 1 100 50 cm /Fm0 Do Q\n");
+    content.push_str("q 10 0 0 10 72 500 cm /Im0 Do Q\n");
+    content.push_str("BT /F1 11 Tf 0 1 -1 0 300 400 Tm (Spun) Tj ET\n");
+    build_pdf_multi_full(
+        vec![content],
+        vec![
+            FontSpec::helvetica("F1", false),
+            FontSpec::helvetica("F2", true),
+        ],
+        vec![
+            XObjectSpec::Form {
+                name: "Fm0",
+                matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                content: "BT /F1 11 Tf 1 0 0 1 10 700 Tm (Form text) Tj ET\n".to_string(),
+            },
+            XObjectSpec::Image {
+                name: "Im0",
+                width: 1,
+                height: 1,
+                data: vec![0],
+            },
+        ],
+    )
+}
+
+/// Relative line positioning: Tm once, then T*/TD between Tj ops.
+/// Lines must not drift right (line-matrix origin, not the Tj cursor).
+/// 4 spans, 0 vectors.
+pub fn td_relative_pdf() -> Vec<u8> {
+    let mut content = String::new();
+    content.push_str(
+        "BT /F1 11 Tf 12 TL 1 0 0 1 72 680 Tm (Line one here) Tj T* (Line two here) Tj ET\n",
+    );
+    content.push_str("BT /F1 11 Tf 1 0 0 1 72 600 Tm (Row A) Tj 0 -12 TD (Row B) Tj ET\n");
+    build_pdf_multi(vec![content])
+}
+
+/// Stroke vs fill: `re` defers to the paint op (S strokes, f fills, B both).
+/// 8 vectors (2 stroked rects), 2 filled rects.
+pub fn fill_stroke_pdf() -> Vec<u8> {
+    let content = "72 600 100 50 re S\n200 600 100 50 re f\n330 600 100 50 re B\n";
+    build_pdf_multi(vec![content.to_string()])
 }
 
 /// N-page mixed-content paper cycling two-column, single-column, and
