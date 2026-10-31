@@ -141,8 +141,8 @@ jobs:
         with:
           path: artifacts
           # Only release payloads: the docker job also uploads a *.dockerbuild
-          # build record whose name breaks this step's unfiltered download.
-          pattern: 'cli-*, wheels-*'
+          # build record that must not be pulled into the release.
+          pattern: '{cli-*,wheels-*}'
           merge-multiple: true
       - name: list assets
         shell: bash
