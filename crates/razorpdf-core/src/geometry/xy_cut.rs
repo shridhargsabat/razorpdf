@@ -90,14 +90,7 @@ fn recurse(
     let tau_x = config.xy_tau_x_mult * med_font;
 
     // Horizontal (Y) valleys first: full-width whitespace bands.
-    if let Some(split_y) = find_valley(
-        boxes,
-        &indices,
-        region,
-        bin,
-        tau_y,
-        Axis::Y,
-    ) {
+    if let Some(split_y) = find_valley(boxes, &indices, region, bin, tau_y, Axis::Y) {
         let (mut top, mut bottom) = (Vec::new(), Vec::new());
         for &i in &indices {
             let (_, cy) = boxes[i].centroid();
@@ -108,10 +101,8 @@ fn recurse(
             }
         }
         if !top.is_empty() && !bottom.is_empty() {
-            let top_region =
-                BBox::union_all(top.iter().map(|&i| boxes[i])).unwrap_or(region);
-            let bottom_region =
-                BBox::union_all(bottom.iter().map(|&i| boxes[i])).unwrap_or(region);
+            let top_region = BBox::union_all(top.iter().map(|&i| boxes[i])).unwrap_or(region);
+            let bottom_region = BBox::union_all(bottom.iter().map(|&i| boxes[i])).unwrap_or(region);
             let mut out = recurse(boxes, top, top_region, med_font, med_h, config);
             out.extend(recurse(
                 boxes,
@@ -126,14 +117,7 @@ fn recurse(
     }
 
     // Vertical (X) valleys: column gutters.
-    if let Some(split_x) = find_valley(
-        boxes,
-        &indices,
-        region,
-        bin,
-        tau_x,
-        Axis::X,
-    ) {
+    if let Some(split_x) = find_valley(boxes, &indices, region, bin, tau_x, Axis::X) {
         let (mut left, mut right) = (Vec::new(), Vec::new());
         for &i in &indices {
             let (cx, _) = boxes[i].centroid();
@@ -144,19 +128,10 @@ fn recurse(
             }
         }
         if !left.is_empty() && !right.is_empty() {
-            let left_region =
-                BBox::union_all(left.iter().map(|&i| boxes[i])).unwrap_or(region);
-            let right_region =
-                BBox::union_all(right.iter().map(|&i| boxes[i])).unwrap_or(region);
+            let left_region = BBox::union_all(left.iter().map(|&i| boxes[i])).unwrap_or(region);
+            let right_region = BBox::union_all(right.iter().map(|&i| boxes[i])).unwrap_or(region);
             let mut out = recurse(boxes, left, left_region, med_font, med_h, config);
-            out.extend(recurse(
-                boxes,
-                right,
-                right_region,
-                med_font,
-                med_h,
-                config,
-            ));
+            out.extend(recurse(boxes, right, right_region, med_font, med_h, config));
             return out;
         }
     }
@@ -230,7 +205,7 @@ fn find_valley(
         if occ {
             if let Some(s) = run_start.take() {
                 let len = k - s;
-                if best.map_or(true, |(_, bl)| len > bl) {
+                if best.is_none_or(|(_, bl)| len > bl) {
                     best = Some((s, len));
                 }
             }
@@ -240,7 +215,7 @@ fn find_valley(
     }
     if let Some(s) = run_start {
         let len = n_bins - s;
-        if best.map_or(true, |(_, bl)| len > bl) {
+        if best.is_none_or(|(_, bl)| len > bl) {
             best = Some((s, len));
         }
     }
@@ -262,12 +237,7 @@ fn find_valley(
 }
 
 /// Largest interior (non-border-touching) valley meeting the threshold.
-fn find_interior_valley(
-    occupied: &[bool],
-    origin: f32,
-    bin: f32,
-    threshold: f32,
-) -> Option<f32> {
+fn find_interior_valley(occupied: &[bool], origin: f32, bin: f32, threshold: f32) -> Option<f32> {
     let n = occupied.len();
     if n < 3 {
         return None;
@@ -284,7 +254,7 @@ fn find_interior_valley(
             k += 1;
         }
         let len = k - s;
-        if best.map_or(true, |(_, bl)| len > bl) {
+        if best.is_none_or(|(_, bl)| len > bl) {
             best = Some((s, len));
         }
     }
@@ -340,13 +310,7 @@ mod tests {
         let mut lines = Vec::new();
         for r in 0..6 {
             let y = 120.0 + r as f32 * 14.0;
-            lines.push(line(
-                &format!("R{r}"),
-                330.0,
-                y,
-                520.0,
-                y + 10.0,
-            ));
+            lines.push(line(&format!("R{r}"), 330.0, y, 520.0, y + 10.0));
             lines.push(line(&format!("L{r}"), 72.0, y, 260.0, y + 10.0));
         }
         let order = reading_order(&lines, &cfg);

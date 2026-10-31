@@ -7,7 +7,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "razorpdf", version, about = "Ultra-fast local-first document parser")]
+#[command(
+    name = "razorpdf",
+    version,
+    about = "Ultra-fast local-first document parser"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

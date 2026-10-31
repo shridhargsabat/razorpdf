@@ -1,5 +1,10 @@
 //! PyO3 zero-copy Python bindings (full implementation: Phase 5).
 
+// `#[pyfunction]`-generated wrappers trip clippy::useless_conversion on
+// `PyResult`; the lint cannot see into the macro expansion, so allow
+// crate-wide (this crate is nothing but pyfunction shims).
+#![allow(clippy::useless_conversion)]
+
 use pyo3::prelude::*;
 
 /// Parse a PDF file into a grounded JSON document (Phase 5).

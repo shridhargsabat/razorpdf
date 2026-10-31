@@ -1,8 +1,6 @@
 //! Phase 2 verification gates over the synthetic fixtures.
 
-use razorpdf_core::{
-    extractor::lopdf_fallback, geometry, test_fixtures, ParserConfig,
-};
+use razorpdf_core::{extractor::lopdf_fallback, geometry, test_fixtures, ParserConfig};
 
 /// Gate 2a: two-column PDF reads column 1 fully before column 2.
 #[test]

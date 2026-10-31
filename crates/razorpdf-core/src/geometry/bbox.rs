@@ -186,10 +186,7 @@ impl BBox {
     /// True when `other` is fully inside `self`.
     #[must_use]
     pub fn contains(&self, other: &BBox) -> bool {
-        other.x0 >= self.x0
-            && other.y0 >= self.y0
-            && other.x1 <= self.x1
-            && other.y1 <= self.y1
+        other.x0 >= self.x0 && other.y0 >= self.y0 && other.x1 <= self.x1 && other.y1 <= self.y1
     }
 
     /// Expand by `pad` points on all sides.

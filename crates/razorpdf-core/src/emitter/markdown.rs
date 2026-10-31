@@ -37,9 +37,9 @@ pub fn blocks_to_markdown(blocks: &[LayoutBlock]) -> String {
                     rows: rows.clone(),
                     has_header: *has_header,
                 };
-                out.push_str(
-                    &crate::geometry::table_grid::detected_table_to_markdown(&table),
-                );
+                out.push_str(&crate::geometry::table_grid::detected_table_to_markdown(
+                    &table,
+                ));
                 out.push('\n');
             }
             BlockKind::VlmFallbackRegion {

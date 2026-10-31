@@ -27,7 +27,10 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
 /// Extract a single page (0-based `page_index`) from a PDF.
 pub fn extract_page(pdf: &[u8], page_index: usize) -> Result<RawPageElements> {
     let pages = extract_document(pdf, "")?;
-    pages.into_iter().nth(page_index).context("page index out of range")
+    pages
+        .into_iter()
+        .nth(page_index)
+        .context("page index out of range")
 }
 
 fn extract_page_with_doc(
@@ -73,10 +76,7 @@ fn resolve<'a>(doc: &'a Document, obj: &'a Object) -> Result<&'a Object> {
     }
 }
 
-fn resolve_dict<'a>(
-    doc: &'a Document,
-    obj: &'a Object,
-) -> Result<&'a lopdf::Dictionary> {
+fn resolve_dict<'a>(doc: &'a Document, obj: &'a Object) -> Result<&'a lopdf::Dictionary> {
     match resolve(doc, obj)? {
         Object::Dictionary(d) => Ok(d),
         _ => anyhow::bail!("expected dictionary"),
@@ -111,14 +111,15 @@ struct FontInfo {
 }
 
 /// Map content-stream font refs (`F1`) to font metadata.
-fn font_map(
-    doc: &Document,
-    page: &lopdf::Dictionary,
-) -> Result<BTreeMap<String, FontInfo>> {
+fn font_map(doc: &Document, page: &lopdf::Dictionary) -> Result<BTreeMap<String, FontInfo>> {
     let mut out = BTreeMap::new();
-    let resources = page.get(b"Resources").map_err(|_| anyhow::anyhow!("no resources"))?;
+    let resources = page
+        .get(b"Resources")
+        .map_err(|_| anyhow::anyhow!("no resources"))?;
     let resources = resolve_dict(doc, resources)?;
-    let font_dict = resources.get(b"Font").map_err(|_| anyhow::anyhow!("no fonts"))?;
+    let font_dict = resources
+        .get(b"Font")
+        .map_err(|_| anyhow::anyhow!("no fonts"))?;
     let font_dict = resolve_dict(doc, font_dict)?;
     for (key, val) in font_dict.iter() {
         let font_ref = String::from_utf8_lossy(key).into_owned();
@@ -193,9 +194,9 @@ fn has_flate_filter(dict: &lopdf::Dictionary) -> bool {
     };
     match filter {
         Object::Name(name) => name.as_slice() == b"FlateDecode".as_slice(),
-        Object::Array(items) => items.iter().any(|f| {
-            matches!(f, Object::Name(n) if n.as_slice() == b"FlateDecode".as_slice())
-        }),
+        Object::Array(items) => items
+            .iter()
+            .any(|f| matches!(f, Object::Name(n) if n.as_slice() == b"FlateDecode".as_slice())),
         _ => false,
     }
 }
@@ -263,8 +264,7 @@ impl WalkState {
             }
             "Tm" => {
                 if op.operands.len() >= 6 {
-                    if let (Some(e), Some(f)) =
-                        (obj_f32(&op.operands[4]), obj_f32(&op.operands[5]))
+                    if let (Some(e), Some(f)) = (obj_f32(&op.operands[4]), obj_f32(&op.operands[5]))
                     {
                         self.tx = e;
                         self.ty = f;
@@ -306,10 +306,10 @@ impl WalkState {
                         match item {
                             Object::String(_, _) => text.push_str(&obj_text_string(item)),
                             // Large negative kerns usually separate words.
-                            n if obj_f32(n).is_some_and(|k| k < -150.0) => {
-                                if !text.ends_with(char::is_whitespace) {
-                                    text.push(' ');
-                                }
+                            n if obj_f32(n).is_some_and(|k| k < -150.0)
+                                && !text.ends_with(char::is_whitespace) =>
+                            {
+                                text.push(' ');
                             }
                             _ => {}
                         }
@@ -352,17 +352,15 @@ impl WalkState {
                     self.cur_y = y;
                 }
             }
-            "re" => {
-                if op.operands.len() >= 4 {
-                    let x = obj_f32(&op.operands[0]).unwrap_or(0.0);
-                    let y = obj_f32(&op.operands[1]).unwrap_or(0.0);
-                    let w = obj_f32(&op.operands[2]).unwrap_or(0.0);
-                    let h = obj_f32(&op.operands[3]).unwrap_or(0.0);
-                    self.emit_vector(x, y, x + w, y);
-                    self.emit_vector(x + w, y, x + w, y + h);
-                    self.emit_vector(x + w, y + h, x, y + h);
-                    self.emit_vector(x, y + h, x, y);
-                }
+            "re" if op.operands.len() >= 4 => {
+                let x = obj_f32(&op.operands[0]).unwrap_or(0.0);
+                let y = obj_f32(&op.operands[1]).unwrap_or(0.0);
+                let w = obj_f32(&op.operands[2]).unwrap_or(0.0);
+                let h = obj_f32(&op.operands[3]).unwrap_or(0.0);
+                self.emit_vector(x, y, x + w, y);
+                self.emit_vector(x + w, y, x + w, y + h);
+                self.emit_vector(x + w, y + h, x, y + h);
+                self.emit_vector(x, y + h, x, y);
             }
             _ => {}
         }
@@ -489,7 +487,11 @@ mod tests {
         assert_eq!(left, 16);
         assert_eq!(right, 16);
 
-        let l0 = p.spans.iter().find(|s| s.text == "Left line 00 abcdef").unwrap();
+        let l0 = p
+            .spans
+            .iter()
+            .find(|s| s.text == "Left line 00 abcdef")
+            .unwrap();
         let r0 = p
             .spans
             .iter()

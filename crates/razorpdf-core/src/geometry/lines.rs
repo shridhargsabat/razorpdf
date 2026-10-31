@@ -35,10 +35,7 @@ pub struct TextLine {
 }
 
 /// Merge spans into horizontal lines using `threshold` vertical overlap.
-pub fn merge_spans_to_lines_with_threshold(
-    spans: &[TextSpan],
-    threshold: f32,
-) -> Vec<TextLine> {
+pub fn merge_spans_to_lines_with_threshold(spans: &[TextSpan], threshold: f32) -> Vec<TextLine> {
     // Order spans top-to-bottom, then left-to-right for deterministic grouping.
     let mut order: Vec<usize> = (0..spans.len()).collect();
     order.sort_by(|&a, &b| {
@@ -69,7 +66,7 @@ pub fn merge_spans_to_lines_with_threshold(
             let ratio = span_box.vertical_overlap_ratio(gbox);
             if ratio > threshold
                 && span_box.h_gap(gbox) <= max_gap
-                && best.map_or(true, |(_, r)| ratio > r)
+                && best.is_none_or(|(_, r)| ratio > r)
             {
                 best = Some((gi, ratio));
             }
@@ -96,7 +93,7 @@ pub fn merge_spans_to_lines_with_threshold(
                     .partial_cmp(&spans[b].bbox.x0)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            build_line(&spans, &g)
+            build_line(spans, &g)
         })
         .collect();
 
@@ -148,14 +145,14 @@ fn build_line(spans: &[TextSpan], idx: &[usize]) -> TextLine {
             let need_space = gap > 0.3 * s.font_size.min(prev.font_size)
                 && !parts
                     .last()
-                    .map_or(false, |p: &String| p.ends_with(char::is_whitespace))
+                    .is_some_and(|p: &String| p.ends_with(char::is_whitespace))
                 && !s.text.starts_with(char::is_whitespace);
             if need_space {
                 parts.push(" ".to_string());
             } else if gap <= 0.0
                 && !parts
                     .last()
-                    .map_or(true, |p: &String| p.ends_with(char::is_whitespace))
+                    .is_none_or(|p: &String| p.ends_with(char::is_whitespace))
                 && !s.text.starts_with(char::is_whitespace)
             {
                 // Touching/overlapping fragments (e.g. kerned Tj splits): no space.

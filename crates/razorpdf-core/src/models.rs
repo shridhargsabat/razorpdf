@@ -47,11 +47,19 @@ pub struct RawPageElements {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BlockKind {
-    Heading { level: u8 },
+    Heading {
+        level: u8,
+    },
     Paragraph,
     CodeBlock,
-    ListItem { ordered: bool, depth: u8 },
-    DeterministicTable { rows: Vec<Vec<String>>, has_header: bool },
+    ListItem {
+        ordered: bool,
+        depth: u8,
+    },
+    DeterministicTable {
+        rows: Vec<Vec<String>>,
+        has_header: bool,
+    },
     /// Triggered when geometric triage detects an unresolvable table/figure/scan
     VlmFallbackRegion {
         reason: TriageReason,

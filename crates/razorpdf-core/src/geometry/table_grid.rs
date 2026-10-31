@@ -5,7 +5,7 @@
 //! zero model calls.
 
 use crate::models::{BBox, TextSpan, VectorSegment};
-use rstar::{AABB, RTree, RTreeObject};
+use rstar::{RTree, RTreeObject, AABB};
 
 /// Max deviation from axis alignment (points).
 const AXIS_TOL: f32 = 1.5;
@@ -59,14 +59,8 @@ impl RTreeObject for Env {
 
 fn envelope_of(x0: f32, y0: f32, x1: f32, y1: f32, pad: f32) -> AABB<[f64; 2]> {
     AABB::from_corners(
-        [
-            f64::from(x0.min(x1) - pad),
-            f64::from(y0.min(y1) - pad),
-        ],
-        [
-            f64::from(x0.max(x1) + pad),
-            f64::from(y0.max(y1) + pad),
-        ],
+        [f64::from(x0.min(x1) - pad), f64::from(y0.min(y1) - pad)],
+        [f64::from(x0.max(x1) + pad), f64::from(y0.max(y1) + pad)],
     )
 }
 
@@ -100,10 +94,7 @@ impl Dsu {
 }
 
 /// Detect vector-grid tables, snapping `spans` into cells.
-pub fn detect_vector_tables(
-    vectors: &[VectorSegment],
-    spans: &[TextSpan],
-) -> Vec<DetectedTable> {
+pub fn detect_vector_tables(vectors: &[VectorSegment], spans: &[TextSpan]) -> Vec<DetectedTable> {
     // 1. Classify axis-aligned segments.
     let mut h: Vec<usize> = Vec::new();
     let mut v: Vec<usize> = Vec::new();
@@ -300,17 +291,12 @@ fn build_table(
 
     // Header heuristic: bold first row (with non-bold body), else require a
     // fully populated first row; default to header for 2+ row grids.
-    let first_full = rows.first().map_or(false, |r| {
-        !r.is_empty() && r.iter().all(|c| !c.is_empty())
-    });
+    let first_full = rows
+        .first()
+        .is_some_and(|r| !r.is_empty() && r.iter().all(|c| !c.is_empty()));
     let has_header = (header_bold && !body_bold) || first_full || nr >= 2;
 
-    let bbox = BBox::new(
-        x_lines[0],
-        y_lines[0],
-        x_lines[nc],
-        y_lines[nr],
-    );
+    let bbox = BBox::new(x_lines[0], y_lines[0], x_lines[nc], y_lines[nr]);
     Some(DetectedTable {
         bbox,
         rows,
@@ -333,7 +319,11 @@ pub fn detected_table_to_markdown(table: &DetectedTable) -> String {
     if table.has_header {
         out.push_str("| ");
         out.push_str(
-            &header.iter().map(|c| esc(c)).collect::<Vec<_>>().join(" | "),
+            &header
+                .iter()
+                .map(|c| esc(c))
+                .collect::<Vec<_>>()
+                .join(" | "),
         );
         out.push_str(" |\n");
     } else {
@@ -356,10 +346,7 @@ pub fn detected_table_to_markdown(table: &DetectedTable) -> String {
 mod tests {
     use super::*;
 
-    fn grid_vectors(
-        xs: &[f32],
-        ys: &[f32],
-    ) -> Vec<VectorSegment> {
+    fn grid_vectors(xs: &[f32], ys: &[f32]) -> Vec<VectorSegment> {
         let mut v = Vec::new();
         for &y in ys {
             v.push(VectorSegment {
@@ -431,9 +418,27 @@ mod tests {
     fn ignores_non_grid_vectors() {
         // Only 2 horizontal lines: below the grid threshold.
         let vectors = vec![
-            VectorSegment { x0: 0.0, y0: 10.0, x1: 100.0, y1: 10.0, stroke_width: 1.0 },
-            VectorSegment { x0: 0.0, y0: 20.0, x1: 100.0, y1: 20.0, stroke_width: 1.0 },
-            VectorSegment { x0: 5.0, y0: 0.0, x1: 5.0, y1: 30.0, stroke_width: 1.0 },
+            VectorSegment {
+                x0: 0.0,
+                y0: 10.0,
+                x1: 100.0,
+                y1: 10.0,
+                stroke_width: 1.0,
+            },
+            VectorSegment {
+                x0: 0.0,
+                y0: 20.0,
+                x1: 100.0,
+                y1: 20.0,
+                stroke_width: 1.0,
+            },
+            VectorSegment {
+                x0: 5.0,
+                y0: 0.0,
+                x1: 5.0,
+                y1: 30.0,
+                stroke_width: 1.0,
+            },
         ];
         assert!(detect_vector_tables(&vectors, &[]).is_empty());
     }
@@ -441,8 +446,20 @@ mod tests {
     #[test]
     fn ignores_diagonal_noise() {
         let vectors = vec![
-            VectorSegment { x0: 0.0, y0: 0.0, x1: 100.0, y1: 50.0, stroke_width: 1.0 },
-            VectorSegment { x0: 10.0, y0: 40.0, x1: 90.0, y1: 5.0, stroke_width: 1.0 },
+            VectorSegment {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 100.0,
+                y1: 50.0,
+                stroke_width: 1.0,
+            },
+            VectorSegment {
+                x0: 10.0,
+                y0: 40.0,
+                x1: 90.0,
+                y1: 5.0,
+                stroke_width: 1.0,
+            },
         ];
         assert!(detect_vector_tables(&vectors, &[]).is_empty());
     }

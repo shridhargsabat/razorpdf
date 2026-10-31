@@ -2,4 +2,4 @@
 
 pub mod scorer;
 
-pub use scorer::{TriageScore, score_page};
+pub use scorer::{score_page, TriageScore};

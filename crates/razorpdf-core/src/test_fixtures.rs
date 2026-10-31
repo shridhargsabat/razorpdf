@@ -100,8 +100,7 @@ fn build_pdf(content: String) -> Vec<u8> {
     catalog.set("Type", Object::Name(b"Catalog".to_vec()));
     catalog.set("Pages", Object::Reference(pages_id));
     let catalog_id = doc.add_object(Object::Dictionary(catalog));
-    doc.trailer
-        .set("Root", Object::Reference(catalog_id));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
 
     let mut buf = Vec::new();
     doc.save_to(&mut buf).expect("fixture pdf serialize");
@@ -199,8 +198,20 @@ pub fn bordered_table_pdf() -> Vec<u8> {
 pub fn messy_overlap_table_pdf() -> Vec<u8> {
     let mut c = String::new();
     c.push_str(&text("F2", 16.0, 72.0, 60.0, "Messy Invoice Scan"));
-    c.push_str(&text("F1", 11.0, 72.0, 100.0, "Invoice total section follows below."));
-    c.push_str(&text("F1", 11.0, 72.0, 116.0, "Values may overlap due to bad kerning."));
+    c.push_str(&text(
+        "F1",
+        11.0,
+        72.0,
+        100.0,
+        "Invoice total section follows below.",
+    ));
+    c.push_str(&text(
+        "F1",
+        11.0,
+        72.0,
+        116.0,
+        "Values may overlap due to bad kerning.",
+    ));
     // Overlapping duplicate pair (1pt x-offset => overlap ~= 0.99).
     c.push_str(&text("F1", 11.0, 72.0, 150.0, "Total amount due 42.00"));
     c.push_str(&text("F1", 11.0, 73.0, 150.0, "Total amount due 42.00"));
@@ -212,26 +223,20 @@ pub fn messy_overlap_table_pdf() -> Vec<u8> {
         [8.0, 10.0, 22.0],
         [-16.0, -8.0, 6.0],
     ];
-    for r in 0..5 {
+    for (r, j) in jitter.iter().enumerate() {
         let y = 190.0 + r as f32 * 16.0;
+        c.push_str(&text("F1", 11.0, 72.0 + j[0], y, &format!("Item{r}")));
         c.push_str(&text(
             "F1",
             11.0,
-            72.0 + jitter[r][0],
-            y,
-            &format!("Item{r}"),
-        ));
-        c.push_str(&text(
-            "F1",
-            11.0,
-            250.0 + jitter[r][1],
+            250.0 + j[1],
             y,
             &format!("{} pcs", r + 1),
         ));
         c.push_str(&text(
             "F1",
             11.0,
-            420.0 + jitter[r][2],
+            420.0 + j[2],
             y,
             &format!("{}.99", (r + 1) * 7),
         ));
