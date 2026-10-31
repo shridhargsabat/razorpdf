@@ -151,6 +151,34 @@ bordered-table paper, fast path, no VLM) on an AMD EPYC 9354P (4 vCPU):
 Reproduce: `cargo run --release -p razorpdf-cli -- bench --pages 100`.
 Criterion suite: `cargo bench -p razorpdf-core --bench throughput`.
 
+### Wild head-to-head (real PDFs, Python API)
+
+`scripts/bench_wild.py` runs `razorpdf.parse_file` (release bindings) against
+pypdf, pdfminer.six, and pymupdf text extraction on `tests/wild/*.pdf`
+(median of 3 runs after 1 warmup, same EPYC box; razorpdf 0.1.0,
+pypdf 6.21.4, pdfminer.six 20260107, pymupdf 2.0):
+
+| file | pages | razorpdf | pypdf | pdfminer | pymupdf |
+|---|---|---|---|---|---|
+| arxiv_attention_2col | 15 | 93 ms (161 p/s) | 1442 ms (10 p/s) | 1667 ms (9 p/s) | 129 ms (116 p/s) |
+| arxiv_deepseek_tables | 86 | 160 ms (537 p/s) | 2588 ms (33 p/s) | 4796 ms (18 p/s) | 227 ms (379 p/s) |
+| financial_borderless_watermark | 1 | <1 ms (2774 p/s) | 2 ms (466 p/s) | 7 ms (135 p/s) | 2 ms (549 p/s) |
+| gst_tax_invoice | 1 | <1 ms (3110 p/s) | 3 ms (309 p/s) | 10 ms (97 p/s) | 2 ms (508 p/s) |
+| mozilla_tracemonkey_2col | 14 | 71 ms (197 p/s) | 911 ms (15 p/s) | 1778 ms (8 p/s) | 77 ms (182 p/s) |
+| TOTAL | 117 | 325 ms (360 p/s) | 4946 ms (24 p/s) | 8260 ms (14 p/s) | 437 ms (268 p/s) |
+
+Content fidelity (required substrings found) plus structural tables emitted:
+
+| file | razorpdf | pypdf | pdfminer | pymupdf | md table rows (razorpdf) |
+|---|---|---|---|---|---|
+| gst_tax_invoice | 5/5 | 5/5 | 5/5 | 5/5 | 3 |
+| arxiv_attention_2col | 5/5 | 5/5 | 5/5 | 5/5 | 13 |
+
+All four backends recover the marker text on these files; only razorpdf
+returns tables as structure (GST's 3-row invoice grid, Attention's Table 1–3
+plus the author block) instead of flat text. Reproduce:
+`.venv/bin/python scripts/bench_wild.py` (after `maturin develop --release`).
+
 The design target is <3 ms/page fast path with ≥90% of digital pages
 never touching a model; triage scores and region counts per page are
 visible via `razorpdf inspect`.

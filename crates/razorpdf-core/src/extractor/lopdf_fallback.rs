@@ -14,7 +14,9 @@ use std::io::Read;
 use std::sync::Arc;
 
 use super::fonts::{parse_tounicode_cmap, FontDecoding};
-use crate::models::{BBox, RawPageElements, TextSpan, VectorSegment};
+use crate::models::{
+    BBox, EmbeddedImage, ImageCodec, PixelLayout, RawPageElements, TextSpan, VectorSegment,
+};
 
 /// Extract every page of a PDF into raw elements.
 ///
@@ -71,6 +73,7 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
                 vectors: state.vectors,
                 image_bboxes: state.image_bboxes,
                 filled_rects: state.filled_rects,
+                embedded_images: state.embedded_images,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -88,7 +91,7 @@ struct PageInput {
     fonts: BTreeMap<String, FontInfo>,
     content_bytes: Vec<u8>,
     forms: HashMap<String, Arc<FormXObject>>,
-    images: HashMap<String, (u32, u32)>,
+    images: HashMap<String, CollectedImage>,
 }
 
 /// Extract a single page (0-based `page_index`) from a PDF.
@@ -308,11 +311,30 @@ fn parse_differences(items: &[Object]) -> Vec<(u8, String)> {
     out
 }
 
-/// Pre-resolved XObjects: named forms + named image dimensions.
+/// Pre-resolved XObjects: named forms + named images (bboxes come from
+/// the CTM at `Do` time; pixels ride along for supported encodings).
 type XObjectMaps = (
     HashMap<String, Arc<FormXObject>>,
-    HashMap<String, (u32, u32)>,
+    HashMap<String, CollectedImage>,
 );
+
+/// Pre-resolved image XObject: dimensions always known; `pixels` present
+/// only for supported codec/layout combinations (others keep bbox-only
+/// placeholders so scanned-page coverage still works).
+#[derive(Debug, Clone)]
+struct CollectedImage {
+    width: u32,
+    height: u32,
+    pixels: Option<ImagePixels>,
+}
+
+/// Decodable pixel payload: armor stripped, still coded per `codec`.
+#[derive(Debug, Clone)]
+struct ImagePixels {
+    codec: ImageCodec,
+    layout: PixelLayout,
+    bytes: Vec<u8>,
+}
 
 /// Pre-resolve a page's XObjects: forms (ops + scoped resources + matrix)
 /// and images (dimensions; bboxes come from the CTM at `Do` time).
@@ -382,7 +404,14 @@ fn collect_xobjects_in(
             let width = stream.dict.get(b"Width").ok().and_then(obj_u32);
             let height = stream.dict.get(b"Height").ok().and_then(obj_u32);
             if let (Some(width), Some(height)) = (width, height) {
-                images.insert(name, (width, height));
+                images.insert(
+                    name,
+                    CollectedImage {
+                        width,
+                        height,
+                        pixels: collect_image_pixels(doc, stream),
+                    },
+                );
             }
             continue;
         }
@@ -513,6 +542,135 @@ fn filters_of(dict: &lopdf::Dictionary) -> Vec<String> {
     }
 }
 
+/// Max decoded pixels per image (bomb guard; 8k × 8k).
+const MAX_IMAGE_PIXELS: u64 = 67_108_864;
+
+/// Resolve an image XObject's pixel payload: armor-stripped bytes plus the
+/// codec/layout needed to decode them later. `None` for unsupported
+/// combinations (CCITT/JBIG2/LZW/JPX, CMYK/Indexed, predictors) — those
+/// keep bbox-only placeholders.
+fn collect_image_pixels(doc: &Document, stream: &lopdf::Stream) -> Option<ImagePixels> {
+    let width = stream.dict.get(b"Width").ok().and_then(obj_u32)?;
+    let height = stream.dict.get(b"Height").ok().and_then(obj_u32)?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return None;
+    }
+    // Walk the filter chain in decode order: strip ASCII armor, find the
+    // one substantive codec. Anything else is unsupported.
+    let mut data: Option<Vec<u8>> = None;
+    let mut codec: Option<ImageCodec> = None;
+    for filter in filters_of(&stream.dict) {
+        let input: &[u8] = data.as_deref().unwrap_or(&stream.content);
+        match filter.as_str() {
+            "ASCII85Decode" | "A85" => data = Some(ascii85_decode(input).ok()?),
+            "ASCIIHexDecode" | "AHx" => data = Some(asciihex_decode(input).ok()?),
+            "DCTDecode" | "DCT" => {
+                if codec.is_some() {
+                    return None;
+                }
+                codec = Some(ImageCodec::Jpeg);
+            }
+            "FlateDecode" | "Fl" => {
+                if codec.is_some() {
+                    return None;
+                }
+                codec = Some(ImageCodec::Flate);
+            }
+            _ => return None,
+        }
+    }
+    let bytes = data.unwrap_or_else(|| stream.content.clone());
+    match codec {
+        // JPEG carries its own colorimetry: the decoder decides the layout.
+        Some(ImageCodec::Jpeg) => Some(ImagePixels {
+            codec: ImageCodec::Jpeg,
+            layout: PixelLayout::Rgb8,
+            bytes,
+        }),
+        Some(ImageCodec::Flate) => Some(ImagePixels {
+            codec: ImageCodec::Flate,
+            layout: pixel_layout(doc, &stream.dict)?,
+            bytes,
+        }),
+        None => Some(ImagePixels {
+            codec: ImageCodec::Raw,
+            layout: pixel_layout(doc, &stream.dict)?,
+            bytes,
+        }),
+        // `codec` above only ever holds Jpeg/Flate; Raw is assigned here.
+        Some(ImageCodec::Raw) => None,
+    }
+}
+
+/// Resolve a Flate/Raw image's sample layout from ColorSpace + BPC.
+/// Supports Device/Cal RGB+Gray and ICCBased (by component count); 8-bit,
+/// plus 1-bit gray. Indexed/Separation/CMYK/Pattern → `None`.
+fn pixel_layout(doc: &Document, dict: &lopdf::Dictionary) -> Option<PixelLayout> {
+    let bpc = dict.get(b"BitsPerComponent").ok().and_then(obj_u32)?;
+    let cs = dict.get(b"ColorSpace").ok()?;
+    let cs = resolve(doc, cs).ok()?;
+    let family = match cs {
+        Object::Name(name) => match name.as_slice() {
+            b"DeviceRGB" | b"CalRGB" => "rgb",
+            b"DeviceGray" | b"CalGray" => "gray",
+            _ => return None,
+        },
+        Object::Array(items) => match items.first() {
+            Some(Object::Name(name)) if name.as_slice() == b"ICCBased" => {
+                let profile = items.get(1)?;
+                let profile = resolve(doc, profile).ok()?;
+                let Object::Stream(stream) = profile else {
+                    return None;
+                };
+                match stream.dict.get(b"N").ok().and_then(obj_u32)? {
+                    1 => "gray",
+                    3 => "rgb",
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    match (family, bpc) {
+        ("rgb", 8) => Some(PixelLayout::Rgb8),
+        ("gray", 8) => Some(PixelLayout::Gray8),
+        ("gray", 1) => Some(PixelLayout::Gray1),
+        _ => None,
+    }
+}
+
+/// Decode ASCIIHex (`>` EOD marker, whitespace ignored, odd nibble padded).
+fn asciihex_decode(data: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 2);
+    let mut hi: Option<u8> = None;
+    for &byte in data {
+        if byte == b'>' {
+            break;
+        }
+        if byte.is_ascii_whitespace() || byte == 0 {
+            continue;
+        }
+        let digit = (byte as char)
+            .to_digit(16)
+            .context("invalid ASCIIHex byte")? as u8;
+        match hi {
+            None => hi = Some(digit),
+            Some(h) => {
+                out.push(h << 4 | digit);
+                hi = None;
+            }
+        }
+    }
+    if let Some(h) = hi {
+        out.push(h << 4);
+    }
+    Ok(out)
+}
+
 /// Decode Adobe ASCII85 (`z` short form, `y` space form omitted per PDF spec
 /// — PDF uses `z` only; whitespace ignored; `<~`/`~>` markers stripped).
 fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>> {
@@ -576,7 +734,7 @@ struct FormXObject {
     fonts: BTreeMap<String, FontInfo>,
     ops: Vec<Operation>,
     forms: HashMap<String, Arc<FormXObject>>,
-    images: HashMap<String, (u32, u32)>,
+    images: HashMap<String, CollectedImage>,
 }
 
 /// Graphics state saved by `q`, restored by `Q`.
@@ -590,7 +748,7 @@ struct GraphicsState {
 struct ResourceScope {
     fonts: BTreeMap<String, FontInfo>,
     forms: HashMap<String, Arc<FormXObject>>,
-    images: HashMap<String, (u32, u32)>,
+    images: HashMap<String, CollectedImage>,
 }
 
 /// Max `Do` recursion depth (cycle guard on top of the visited set).
@@ -638,9 +796,10 @@ struct WalkState {
     tm_lin: [f32; 4],
     gstack: Vec<GraphicsState>,
     forms: HashMap<String, Arc<FormXObject>>,
-    images: HashMap<String, (u32, u32)>,
+    images: HashMap<String, CollectedImage>,
     scope_stack: Vec<ResourceScope>,
     image_bboxes: Vec<BBox>,
+    embedded_images: Vec<EmbeddedImage>,
 }
 
 impl WalkState {
@@ -649,7 +808,7 @@ impl WalkState {
         top_y: f32,
         fonts: BTreeMap<String, FontInfo>,
         forms: HashMap<String, Arc<FormXObject>>,
-        images: HashMap<String, (u32, u32)>,
+        images: HashMap<String, CollectedImage>,
     ) -> Self {
         Self {
             origin_x,
@@ -678,6 +837,7 @@ impl WalkState {
             images,
             scope_stack: Vec::new(),
             image_bboxes: Vec::new(),
+            embedded_images: Vec::new(),
         }
     }
 
@@ -897,18 +1057,35 @@ impl WalkState {
 
     /// Execute a Form XObject (scoped resources + matrix) or record an image.
     fn invoke_xobject(&mut self, name: &str, depth: u8) {
-        if self.images.contains_key(name) {
+        // Clone the payload up front: one bytes copy per placement, and no
+        // borrow held across the output pushes below.
+        let hit = self
+            .images
+            .get(name)
+            .map(|c| (c.width, c.height, c.pixels.clone()));
+        if let Some((width, height, pixels)) = hit {
             // Images render into the unit square mapped by the CTM.
             let (x0, y0) = transform_point(&self.ctm, 0.0, 0.0);
             let (x1, y1) = transform_point(&self.ctm, 1.0, 1.0);
             let (lx, hx) = (x0.min(x1), x0.max(x1));
             let (ly, hy) = (y0.min(y1), y0.max(y1));
-            self.image_bboxes.push(BBox::new(
+            let bbox = BBox::new(
                 lx - self.origin_x,
                 self.top_y - hy,
                 hx - self.origin_x,
                 self.top_y - ly,
-            ));
+            );
+            self.image_bboxes.push(bbox);
+            if let Some(pixels) = pixels {
+                self.embedded_images.push(EmbeddedImage {
+                    bbox,
+                    width,
+                    height,
+                    codec: pixels.codec,
+                    layout: pixels.layout,
+                    bytes: pixels.bytes,
+                });
+            }
             return;
         }
         let form = self.forms.get(name).cloned();
@@ -1305,5 +1482,36 @@ mod tests {
         assert!((p.filled_rects[0].y0 - 142.0).abs() < 0.05);
         assert!((p.filled_rects[1].x0 - 330.0).abs() < 0.05);
         assert!((p.filled_rects[1].y1 - 192.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn extracts_embedded_image_pixels() {
+        let pdf = test_fixtures::image_pixels_pdf();
+        let p = extract_page(&pdf, 0).expect("extract");
+        assert_eq!(p.image_bboxes.len(), 4);
+        assert_eq!(p.embedded_images.len(), 3);
+        let rgb = &p.embedded_images[0];
+        assert_eq!((rgb.width, rgb.height), (4, 2));
+        assert_eq!(rgb.codec, ImageCodec::Flate);
+        assert_eq!(rgb.layout, PixelLayout::Rgb8);
+        assert!((rgb.bbox.x0 - 72.0).abs() < 0.01);
+        assert!((rgb.bbox.y0 - 342.0).abs() < 0.01);
+        assert!((rgb.bbox.x1 - 172.0).abs() < 0.01);
+        assert!((rgb.bbox.y1 - 392.0).abs() < 0.01);
+        let jpeg = &p.embedded_images[1];
+        assert_eq!((jpeg.width, jpeg.height), (4, 4));
+        assert_eq!(jpeg.codec, ImageCodec::Jpeg);
+        let gray = &p.embedded_images[2];
+        assert_eq!(gray.codec, ImageCodec::Raw);
+        assert_eq!(gray.layout, PixelLayout::Gray8);
+        assert_eq!(gray.bytes, vec![0u8, 85, 170, 255]);
+    }
+
+    #[test]
+    fn asciihex_decode_basics() {
+        assert_eq!(asciihex_decode(b"48656c6c6f>").unwrap(), b"Hello");
+        assert_eq!(asciihex_decode(b"61 62>").unwrap(), b"ab");
+        assert_eq!(asciihex_decode(b"6>").unwrap(), b"`"); // odd nibble pads low
+        assert!(asciihex_decode(b"zz>").is_err());
     }
 }

@@ -10,7 +10,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 authors = ["razorpdf contributors"]
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["full"] }
 rayon = "1.10"
 rstar = "0.12"
 lopdf = "0.34"
-image = { version = "0.25", features = ["webp", "png"] }
+image = { version = "0.25", features = ["webp", "png", "jpeg"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }

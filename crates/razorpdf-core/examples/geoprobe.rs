@@ -81,6 +81,17 @@ fn main() -> anyhow::Result<()> {
         ruled.len(),
         borderless.len()
     );
+    // Debug: dump the synthetic canvas (with decoded image pixels) to PNG.
+    let img = razorpdf_core::vlm::cropper::render_synthetic_canvas(p, 72);
+    let out = format!("/tmp/canvas_p{page}.png");
+    if let Err(e) = img.save(&out) {
+        println!("canvas save failed: {e}");
+    } else {
+        println!(
+            "--- canvas: {out} (embedded={}) ---",
+            p.embedded_images.len()
+        );
+    }
     for t in ruled.iter().chain(borderless.iter()) {
         let vectors_inside = p
             .vectors

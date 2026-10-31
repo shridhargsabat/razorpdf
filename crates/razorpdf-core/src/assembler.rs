@@ -75,7 +75,7 @@ where
     let vlm_fallback_regions: usize = triaged.iter().map(|t| t.fallback_regions.len()).sum();
 
     // 2. Render crops for regions (synchronous raster work).
-    let jobs = render_jobs(&pages, &triaged, config)?;
+    let jobs = render_jobs(pdf, &pages, &triaged, config)?;
     tracing::debug!(
         pages = total_pages,
         vlm_jobs = jobs.len(),
@@ -115,6 +115,7 @@ struct RegionJob {
 
 /// Render one crop + data URI per fallback region.
 fn render_jobs(
+    pdf: &[u8],
     pages: &[RawPageElements],
     triaged: &[PageTriage],
     config: &ParserConfig,
@@ -124,7 +125,8 @@ fn render_jobs(
         if tri.fallback_regions.is_empty() {
             continue;
         }
-        let canvas = cropper::render_synthetic_canvas(page, config.vlm.render_dpi);
+        let canvas =
+            cropper::render_page_canvas(pdf, page, config.vlm.render_dpi, config.vlm.canvas_source);
         for (region_index, region) in tri.fallback_regions.iter().enumerate() {
             let uri = cropper::crop_region_to_data_uri(
                 &canvas,

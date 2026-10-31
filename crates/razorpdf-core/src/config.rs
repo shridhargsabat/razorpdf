@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::vlm::cropper::CanvasSource;
+
 /// Top-level parser configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParserConfig {
@@ -58,6 +60,9 @@ pub struct VlmConfig {
     pub timeout_secs: u64,
     /// Max completion tokens per region request.
     pub max_tokens: u32,
+    /// Page-canvas source for VLM crops (synthetic default; `auto` uses
+    /// `pdftoppm` when present on PATH).
+    pub canvas_source: CanvasSource,
 }
 
 impl Default for VlmConfig {
@@ -72,6 +77,7 @@ impl Default for VlmConfig {
             webp_quality: 80,
             timeout_secs: 180,
             max_tokens: 2000,
+            canvas_source: CanvasSource::Synthetic,
         }
     }
 }

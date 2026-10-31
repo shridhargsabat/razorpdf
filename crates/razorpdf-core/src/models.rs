@@ -45,6 +45,45 @@ pub struct RawPageElements {
     pub image_bboxes: Vec<BBox>,
     /// Filled rectangles (`re` + fill paint): shaded cells, heatmaps.
     pub filled_rects: Vec<BBox>,
+    /// Placed raster images with decodable pixels (a subset of
+    /// `image_bboxes`: unsupported encodings keep their bbox only).
+    pub embedded_images: Vec<EmbeddedImage>,
+}
+
+/// Stream codec of an embedded image's bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageCodec {
+    /// DCTDecode: bytes are a complete JPEG stream.
+    Jpeg,
+    /// FlateDecode: inflate, then read samples per `PixelLayout`.
+    Flate,
+    /// No filter: raw samples per `PixelLayout`.
+    Raw,
+}
+
+/// Sample layout of (inflated) image bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PixelLayout {
+    /// 8-bit RGB triplets (`3 * w * h` bytes).
+    Rgb8,
+    /// 8-bit gray samples (`w * h` bytes).
+    Gray8,
+    /// 1-bit gray samples, MSB first (`ceil(w / 8) * h` bytes, 1 = white).
+    Gray1,
+}
+
+/// A placed raster image with lazily decodable pixels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddedImage {
+    /// Placed bbox in top-left point space (axis-aligned union of the
+    /// CTM-mapped unit square).
+    pub bbox: BBox,
+    pub width: u32,
+    pub height: u32,
+    pub codec: ImageCodec,
+    pub layout: PixelLayout,
+    /// Stream bytes with ASCII armor stripped (still coded per `codec`).
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

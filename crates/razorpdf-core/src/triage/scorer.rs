@@ -657,6 +657,7 @@ mod tests {
             vectors,
             image_bboxes: Vec::new(),
             filled_rects: Vec::new(),
+            embedded_images: Vec::new(),
         }
     }
 

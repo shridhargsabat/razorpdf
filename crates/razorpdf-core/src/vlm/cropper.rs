@@ -6,8 +6,9 @@
 
 use anyhow::{Context, Result};
 use image::{codecs::webp::WebPEncoder, Rgb, RgbImage};
+use serde::{Deserialize, Serialize};
 
-use crate::models::{BBox, RawPageElements};
+use crate::models::{BBox, EmbeddedImage, ImageCodec, PixelLayout, RawPageElements};
 
 /// Pixel rectangle `(x, y, w, h)` for a region on a rendered page image.
 ///
@@ -36,7 +37,9 @@ pub fn region_to_pixels(
 /// Render a deterministic synthetic canvas of the page at `dpi`.
 ///
 /// White background; text spans become gray bars (darker when bold),
-/// vectors become near-black strokes, image bboxes become boxed gray fills.
+/// vectors become near-black strokes, image bboxes become boxed gray fills
+/// — overlaid with real decoded pixels where the image encoding is
+/// supported (JPEG, Flate/Raw RGB+Gray).
 #[must_use]
 pub fn render_synthetic_canvas(page: &RawPageElements, dpi: u32) -> RgbImage {
     let scale = dpi.max(1) as f32 / 72.0;
@@ -48,6 +51,10 @@ pub fn render_synthetic_canvas(page: &RawPageElements, dpi: u32) -> RgbImage {
         let (x0, y0, x1, y1) = rect_px(bbox, scale, w, h);
         fill_rect(&mut img, x0, y0, x1, y1, Rgb([205, 205, 205]));
         stroke_rect(&mut img, x0, y0, x1, y1, Rgb([120, 120, 120]));
+    }
+    // Real pixels paint over their placeholders; decode failures keep gray.
+    for embedded in &page.embedded_images {
+        paste_embedded(&mut img, embedded, scale);
     }
     for span in &page.spans {
         let shade = if span.is_bold { 45u8 } else { 95u8 };
@@ -116,6 +123,234 @@ pub fn crop_region_to_data_uri(
         "data:image/webp;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(&webp)
     ))
+}
+
+/// Page-canvas source for VLM crops.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CanvasSource {
+    /// Deterministic synthetic canvas (spans/vectors/decoded images).
+    /// Stable everywhere: the default for tests and benchmarks.
+    #[default]
+    #[serde(rename = "synthetic")]
+    Synthetic,
+    /// `pdftoppm` when present on PATH, else the synthetic canvas.
+    #[serde(rename = "auto")]
+    Auto,
+}
+
+/// Render a page canvas per `source`. Infallible: any rasterizer failure
+/// falls back to the synthetic canvas.
+#[must_use]
+pub fn render_page_canvas(
+    pdf: &[u8],
+    page: &RawPageElements,
+    dpi: u32,
+    source: CanvasSource,
+) -> RgbImage {
+    if source == CanvasSource::Auto {
+        if let Some(raster) = render_page_via_pdftoppm(pdf, page.page_index, dpi) {
+            return raster;
+        }
+    }
+    render_synthetic_canvas(page, dpi)
+}
+
+/// Max decoded pixels per image or raster page (bomb guard; 8k × 8k).
+/// Mirrors the extractor's collection guard (defense in depth: embedded
+/// images are public data and may come from anywhere).
+const MAX_IMAGE_PIXELS: u64 = 67_108_864;
+
+/// Render one page to RGB pixels via `pdftoppm` (poppler). Spills `pdf` to
+/// a temp file, rasterizes the single page to PNG, decodes it. `None` when
+/// pdftoppm is missing, times out (30 s), or fails.
+pub fn render_page_via_pdftoppm(pdf: &[u8], page_index: usize, dpi: u32) -> Option<RgbImage> {
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tag = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let dir = std::env::temp_dir();
+    let input = dir.join(format!("razorpdf-{pid}.{tag}.pdf"));
+    let prefix = dir.join(format!("razorpdf-{pid}.{tag}-page"));
+    // pdftoppm appends `.png` to the whole prefix.
+    let out_png = std::path::PathBuf::from(format!("{}.png", prefix.display()));
+    struct Cleanup {
+        paths: Vec<std::path::PathBuf>,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for path in &self.paths {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let _cleanup = Cleanup {
+        paths: vec![input.clone(), out_png.clone()],
+    };
+    std::fs::write(&input, pdf).ok()?;
+    let page_no = page_index.checked_add(1)?; // pdftoppm is 1-based
+    let mut child = Command::new("pdftoppm")
+        .args([
+            "-png",
+            "-r",
+            &dpi.max(1).to_string(),
+            "-f",
+            &page_no.to_string(),
+            "-l",
+            &page_no.to_string(),
+            "-singlefile",
+        ])
+        .arg(&input)
+        .arg(&prefix)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?; // missing binary → None
+                // Bounded wait: poll 30 s, then kill (never hang the VLM path).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                return None;
+            }
+        }
+    }
+    let png = std::fs::read(&out_png).ok()?;
+    let decoded = image::load_from_memory(&png).ok()?;
+    let (w, h) = (decoded.width(), decoded.height());
+    if u64::from(w) * u64::from(h) > MAX_IMAGE_PIXELS {
+        return None;
+    }
+    Some(decoded.to_rgb8())
+}
+
+/// Paste an embedded image's decoded pixels over its placeholder rect
+/// (axis-aligned; rotation is approximated by the bbox union, which is
+/// what VLM context needs). No-op on any decode failure.
+fn paste_embedded(img: &mut RgbImage, embedded: &EmbeddedImage, scale: f32) {
+    use image::GenericImage as _;
+    let (w, h) = (img.width(), img.height());
+    let (x0, y0, x1, y1) = rect_px(&embedded.bbox, scale, w, h);
+    let (rw, rh) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if rw == 0 || rh == 0 {
+        return;
+    }
+    let Some(decoded) = decode_embedded(embedded) else {
+        return;
+    };
+    let resized = image::imageops::resize(&decoded, rw, rh, image::imageops::FilterType::Triangle);
+    let _ = img.copy_from(&resized, x0, y0);
+}
+
+/// Decode an embedded image to RGB pixels. `None` on any failure or guard
+/// trip (caller keeps the gray placeholder).
+fn decode_embedded(image: &EmbeddedImage) -> Option<RgbImage> {
+    if image.width == 0 || image.height == 0 {
+        return None;
+    }
+    if u64::from(image.width) * u64::from(image.height) > MAX_IMAGE_PIXELS {
+        return None;
+    }
+    let coded: &[u8] = &image.bytes;
+    match image.codec {
+        ImageCodec::Jpeg => decode_jpeg(coded),
+        ImageCodec::Flate => {
+            let expected = expected_len(image.layout, image.width, image.height)?;
+            let raw = inflate_exact(coded, expected)?;
+            samples_to_rgb(&raw, image.layout, image.width, image.height)
+        }
+        ImageCodec::Raw => {
+            let expected = expected_len(image.layout, image.width, image.height)?;
+            if coded.len() != expected {
+                return None;
+            }
+            samples_to_rgb(coded, image.layout, image.width, image.height)
+        }
+    }
+}
+
+/// Exact inflated/raw byte count for a layout (checked arithmetic).
+/// The exactness doubles as a predictor guard: PNG-predictor streams carry
+/// an extra filter byte per row and fail here → placeholder, not garbage.
+fn expected_len(layout: PixelLayout, w: u32, h: u32) -> Option<usize> {
+    let (w, h) = (w as usize, h as usize);
+    match layout {
+        PixelLayout::Rgb8 => w.checked_mul(h)?.checked_mul(3),
+        PixelLayout::Gray8 => w.checked_mul(h),
+        PixelLayout::Gray1 => w.checked_add(7)?.checked_div(8)?.checked_mul(h),
+    }
+}
+
+/// Inflate zlib bytes, accepting only the exact expected length (bounded
+/// growth: one byte of slack to detect over-long streams).
+fn inflate_exact(coded: &[u8], expected: usize) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut decoder = flate2::read::ZlibDecoder::new(coded);
+    let mut buf = Vec::new();
+    decoder
+        .by_ref()
+        .take(expected as u64 + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() != expected {
+        return None;
+    }
+    Some(buf)
+}
+
+/// Sample bytes → RGB. PDF image rows run top-to-bottom like the canvas.
+fn samples_to_rgb(samples: &[u8], layout: PixelLayout, w: u32, h: u32) -> Option<RgbImage> {
+    match layout {
+        PixelLayout::Rgb8 => RgbImage::from_raw(w, h, samples.to_vec()),
+        PixelLayout::Gray8 => {
+            let gray = image::GrayImage::from_raw(w, h, samples.to_vec())?;
+            Some(image::DynamicImage::ImageLuma8(gray).to_rgb8())
+        }
+        PixelLayout::Gray1 => {
+            let stride = (w as usize).div_ceil(8);
+            let mut rgb = RgbImage::new(w, h);
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let byte = *samples.get(y * stride + x / 8)?;
+                    let bit = (byte >> (7 - (x % 8))) & 1;
+                    let v = if bit == 1 { 255u8 } else { 0u8 };
+                    rgb.put_pixel(x as u32, y as u32, Rgb([v, v, v]));
+                }
+            }
+            Some(rgb)
+        }
+    }
+}
+
+/// Decode JPEG bytes after a header-only dimension pre-check (bomb guard).
+fn decode_jpeg(coded: &[u8]) -> Option<RgbImage> {
+    use std::io::Cursor;
+    let dims = image::codecs::jpeg::JpegDecoder::new(Cursor::new(coded))
+        .ok()
+        .map(|decoder| {
+            use image::ImageDecoder as _;
+            decoder.dimensions()
+        })?;
+    if u64::from(dims.0) * u64::from(dims.1) > MAX_IMAGE_PIXELS {
+        return None;
+    }
+    image::load_from_memory(coded).ok().map(|d| d.to_rgb8())
 }
 
 /// Clamped pixel rect for a point-space bbox.
@@ -227,6 +462,7 @@ mod tests {
             }],
             image_bboxes: Vec::new(),
             filled_rects: Vec::new(),
+            embedded_images: Vec::new(),
         }
     }
 
@@ -272,5 +508,122 @@ mod tests {
         assert_eq!(&webp[8..12], b"WEBP");
         let uri = crop_region_to_data_uri(&img, &region, 612.0, 792.0, 80).expect("uri");
         assert!(uri.starts_with("data:image/webp;base64,"));
+    }
+
+    fn embedded(
+        codec: ImageCodec,
+        layout: PixelLayout,
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+    ) -> EmbeddedImage {
+        EmbeddedImage {
+            bbox: BBox::zero(),
+            width,
+            height,
+            codec,
+            layout,
+            bytes,
+        }
+    }
+
+    fn flate_of(raw: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(raw).expect("flate");
+        enc.finish().expect("finish")
+    }
+
+    #[test]
+    fn flate_rgb_decodes_exact() {
+        let raw = vec![
+            255, 0, 0, 0, 255, 0, // R G
+            0, 0, 255, 255, 255, 255, // B W
+        ];
+        let img = embedded(ImageCodec::Flate, PixelLayout::Rgb8, 2, 2, flate_of(&raw));
+        let rgb = decode_embedded(&img).expect("decode");
+        assert_eq!(rgb.get_pixel(0, 0), &Rgb([255, 0, 0]));
+        assert_eq!(rgb.get_pixel(1, 0), &Rgb([0, 255, 0]));
+        assert_eq!(rgb.get_pixel(0, 1), &Rgb([0, 0, 255]));
+        assert_eq!(rgb.get_pixel(1, 1), &Rgb([255, 255, 255]));
+    }
+
+    #[test]
+    fn gray1_bits_expand_msb_first() {
+        // 0b10110000 → W B W W B B B B.
+        let img = embedded(ImageCodec::Raw, PixelLayout::Gray1, 8, 1, vec![0b1011_0000]);
+        let rgb = decode_embedded(&img).expect("gray1");
+        let (w, b) = (Rgb([255, 255, 255]), Rgb([0, 0, 0]));
+        assert_eq!(rgb.get_pixel(0, 0), &w);
+        assert_eq!(rgb.get_pixel(1, 0), &b);
+        assert_eq!(rgb.get_pixel(2, 0), &w);
+        assert_eq!(rgb.get_pixel(3, 0), &w);
+        assert_eq!(rgb.get_pixel(4, 0), &b);
+        assert_eq!(rgb.get_pixel(7, 0), &b);
+    }
+
+    #[test]
+    fn corrupt_and_predictor_streams_fall_back() {
+        // Garbage flate → None.
+        let bad = embedded(ImageCodec::Flate, PixelLayout::Rgb8, 2, 2, vec![1, 2, 3, 4]);
+        assert!(decode_embedded(&bad).is_none());
+        // Predictor-shaped (filter byte per row): 6 bytes ≠ 4 → None.
+        let pred = embedded(
+            ImageCodec::Flate,
+            PixelLayout::Gray8,
+            2,
+            2,
+            flate_of(&[0, 1, 2, 0, 3, 4]),
+        );
+        assert!(decode_embedded(&pred).is_none());
+        // Truncated JPEG → None.
+        let jpg = embedded(
+            ImageCodec::Jpeg,
+            PixelLayout::Rgb8,
+            4,
+            4,
+            vec![0xFF, 0xD8, 0x00],
+        );
+        assert!(decode_embedded(&jpg).is_none());
+    }
+
+    #[test]
+    fn canvas_pastes_real_pixels() {
+        let pdf = crate::test_fixtures::image_pixels_pdf();
+        let page = crate::extractor::extract_page(&pdf, 0).expect("extract");
+        let img = render_synthetic_canvas(&page, 72);
+        // ImRGB rect x 72..172, y 342..392: R / W / C quadrants.
+        assert_eq!(img.get_pixel(74, 344), &Rgb([255, 0, 0]));
+        assert_eq!(img.get_pixel(170, 344), &Rgb([255, 255, 255]));
+        assert_eq!(img.get_pixel(74, 390), &Rgb([0, 255, 255]));
+        // JPEG red block center (lossy tolerance).
+        let px = img.get_pixel(320, 272);
+        assert!(
+            px[0] > 180 && px[1] < 120 && px[2] < 120,
+            "jpeg red: {px:?}"
+        );
+        // Raw gray ramp: dark corner → bright corner.
+        let dark = img.get_pixel(73, 173);
+        let bright = img.get_pixel(91, 191);
+        assert!(dark[0] < 40, "dark: {dark:?}");
+        assert!(bright[0] > 215, "bright: {bright:?}");
+        // CMYK placeholder stays gray.
+        assert_eq!(img.get_pixel(310, 182), &Rgb([205, 205, 205]));
+    }
+
+    #[test]
+    fn pdftoppm_rasterizes_when_present() {
+        let pdf = crate::test_fixtures::single_col_clean_pdf();
+        let Some(img) = render_page_via_pdftoppm(&pdf, 0, 72) else {
+            // Absent binary: verify that's really why (spawn failure).
+            assert!(
+                std::process::Command::new("pdftoppm").output().is_err(),
+                "pdftoppm exists but render failed"
+            );
+            return;
+        };
+        assert_eq!((img.width(), img.height()), (612, 792));
+        let nonwhite = img.pixels().filter(|p| **p != Rgb([255, 255, 255])).count();
+        assert!(nonwhite > 1000, "expected text pixels, got {nonwhite}");
     }
 }

@@ -16,11 +16,15 @@ pub async fn parse(
     json: Option<&str>,
     vlm_url: Option<&str>,
     mock_vlm: bool,
+    canvas_source: Option<&str>,
 ) -> Result<()> {
     let bytes = std::fs::read(input).with_context(|| format!("read {input}"))?;
     let mut config = ParserConfig::default();
     if let Some(url) = vlm_url {
         config.vlm.url = Some(url.to_string());
+    }
+    if canvas_source == Some("auto") {
+        config.vlm.canvas_source = razorpdf_core::vlm::cropper::CanvasSource::Auto;
     }
 
     if mock_vlm {

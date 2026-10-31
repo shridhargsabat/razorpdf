@@ -49,6 +49,10 @@ struct ParseArgs {
     /// Resolve VLM regions with the deterministic offline mock provider.
     #[arg(long)]
     mock_vlm: bool,
+    /// Page-canvas source for VLM crops: synthetic (default) or auto
+    /// (`pdftoppm` when present on PATH, else synthetic).
+    #[arg(long, value_parser = ["synthetic", "auto"])]
+    canvas_source: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -84,6 +88,7 @@ async fn main() -> Result<()> {
                 a.json.as_deref(),
                 a.vlm_url.as_deref(),
                 a.mock_vlm,
+                a.canvas_source.as_deref(),
             )
             .await
         }

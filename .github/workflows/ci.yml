@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: test + clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+
+  wheel:
+    name: maturin wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: patchelf (manylinux repair)
+        run: pip install patchelf
+      - name: build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: latest
+          command: build
+          args: --release -m crates/razorpdf-py/Cargo.toml -o dist
+      - name: smoke-import
+        run: |
+          pip install dist/*.whl
+          python -c "import razorpdf; print(sorted(razorpdf.__all__))"

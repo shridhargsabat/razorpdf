@@ -104,6 +104,9 @@ enum XObjectSpec {
         width: i64,
         height: i64,
         data: Vec<u8>,
+        filter: Option<&'static str>,
+        colorspace: &'static str,
+        bpc: i64,
     },
 }
 
@@ -171,14 +174,20 @@ fn build_pdf_multi_full(
                     width,
                     height,
                     data,
+                    filter,
+                    colorspace,
+                    bpc,
                 } => {
                     let mut img_dict = lopdf::Dictionary::new();
                     img_dict.set("Type", Object::Name(b"XObject".to_vec()));
                     img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
                     img_dict.set("Width", Object::Integer(*width));
                     img_dict.set("Height", Object::Integer(*height));
-                    img_dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
-                    img_dict.set("BitsPerComponent", Object::Integer(8));
+                    img_dict.set("ColorSpace", Object::Name(colorspace.as_bytes().to_vec()));
+                    img_dict.set("BitsPerComponent", Object::Integer(*bpc));
+                    if let Some(filter) = filter {
+                        img_dict.set("Filter", Object::Name(filter.as_bytes().to_vec()));
+                    }
                     let img_id =
                         doc.add_object(Object::Stream(Stream::new(img_dict, data.clone())));
                     xobject_map.set(*name, Object::Reference(img_id));
@@ -449,9 +458,90 @@ pub fn xobject_form_pdf() -> Vec<u8> {
                 width: 1,
                 height: 1,
                 data: vec![0],
+                filter: None,
+                colorspace: "DeviceGray",
+                bpc: 8,
             },
         ],
     )
+}
+
+/// Embedded image pixels: Flate RGB 4×2, JPEG 4×4 red, raw gray 2×2,
+/// plus an unsupported CMYK (bbox-only placeholder).
+/// 0 spans, 0 vectors, 4 image bboxes, 3 embedded.
+pub fn image_pixels_pdf() -> Vec<u8> {
+    let rgb: Vec<u8> = vec![
+        255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, // R G B W
+        0, 255, 255, 255, 0, 255, 255, 255, 0, 0, 0, 0, // C M Y K
+    ];
+    let gray2 = vec![0u8, 85, 170, 255];
+    let jpeg = jpeg_bytes(4, 4, [220, 30, 30]);
+    let cmyk = flate_bytes(&[0u8; 16]); // 2×2 CMYK → unsupported
+    let mut content = String::new();
+    content.push_str("q 100 0 0 50 72 400 cm /ImRGB Do Q\n");
+    content.push_str("q 40 0 0 40 300 500 cm /ImJ Do Q\n");
+    content.push_str("q 20 0 0 20 72 600 cm /ImG Do Q\n");
+    content.push_str("q 20 0 0 20 300 600 cm /ImC Do Q\n");
+    build_pdf_multi_full(
+        vec![content],
+        vec![FontSpec::helvetica("F1", false)],
+        vec![
+            XObjectSpec::Image {
+                name: "ImRGB",
+                width: 4,
+                height: 2,
+                data: flate_bytes(&rgb),
+                filter: Some("FlateDecode"),
+                colorspace: "DeviceRGB",
+                bpc: 8,
+            },
+            XObjectSpec::Image {
+                name: "ImJ",
+                width: 4,
+                height: 4,
+                data: jpeg,
+                filter: Some("DCTDecode"),
+                colorspace: "DeviceRGB",
+                bpc: 8,
+            },
+            XObjectSpec::Image {
+                name: "ImG",
+                width: 2,
+                height: 2,
+                data: gray2,
+                filter: None,
+                colorspace: "DeviceGray",
+                bpc: 8,
+            },
+            XObjectSpec::Image {
+                name: "ImC",
+                width: 2,
+                height: 2,
+                data: cmyk,
+                filter: Some("FlateDecode"),
+                colorspace: "DeviceCMYK",
+                bpc: 8,
+            },
+        ],
+    )
+}
+
+/// Zlib-compress bytes (fixture image streams).
+fn flate_bytes(raw: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(raw).expect("flate fixture");
+    enc.finish().expect("flate finish")
+}
+
+/// Solid-color JPEG bytes (fixture image streams).
+fn jpeg_bytes(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(w, h, image::Rgb(rgb));
+    let mut buf = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut buf)
+        .encode_image(&image::DynamicImage::ImageRgb8(img))
+        .expect("jpeg fixture encode");
+    buf
 }
 
 /// Relative line positioning: Tm once, then T*/TD between Tj ops.
