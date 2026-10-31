@@ -28,7 +28,7 @@ doc = razorpdf.parse_file("paper.pdf")   # -> {"markdown": ..., "chunks": [...]}
 Prefer a binary? Grab one from [Releases](https://github.com/shridhargsabat/razorpdf/releases) (Linux shown):
 
 ```bash
-curl -L -o razorpdf.tar.gz https://github.com/shridhargsabat/razorpdf/releases/download/v0.1.1/razorpdf-v0.1.1-x86_64-unknown-linux-gnu.tar.gz
+curl -L -o razorpdf.tar.gz https://github.com/shridhargsabat/razorpdf/releases/download/v0.1.2/razorpdf-v0.1.2-x86_64-unknown-linux-gnu.tar.gz
 tar xzf razorpdf.tar.gz && ./razorpdf parse paper.pdf -o paper.md --json paper.json
 ```
 
@@ -39,7 +39,7 @@ git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf
 docker compose run --rm parse   # samples/invoice.pdf -> ./out/invoice.{md,json}
 ```
 
-Prefer a prebuilt image? Each release publishes to GHCR (starting v0.1.2):
+Prefer a prebuilt image? Each release publishes to GHCR:
 
 ```bash
 docker run --rm -v ./samples:/work:ro ghcr.io/shridhargsabat/razorpdf:latest \
