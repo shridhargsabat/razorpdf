@@ -193,31 +193,98 @@ fn page_content(doc: &Document, page: &lopdf::Dictionary) -> Result<Vec<u8>> {
     }
 }
 
-/// Raw (decompressed if `/FlateDecode`) bytes of a content stream.
+/// Raw bytes of a content stream, decoded through its full `/Filter` chain
+/// in order (e.g. `[ /ASCII85Decode /FlateDecode ]` as emitted by reportlab).
 fn stream_bytes(stream: &lopdf::Stream) -> Result<Vec<u8>> {
-    if has_flate_filter(&stream.dict) {
-        let mut decoder = flate2::read::ZlibDecoder::new(&stream.content[..]);
-        let mut buf = Vec::new();
-        decoder
-            .read_to_end(&mut buf)
-            .context("inflate content stream")?;
-        Ok(buf)
-    } else {
-        Ok(stream.content.clone())
+    let mut data = stream.content.clone();
+    for filter in filters_of(&stream.dict) {
+        match filter.as_str() {
+            "FlateDecode" | "Fl" => {
+                let mut decoder = flate2::read::ZlibDecoder::new(&data[..]);
+                let mut buf = Vec::new();
+                decoder
+                    .read_to_end(&mut buf)
+                    .context("inflate content stream")?;
+                data = buf;
+            }
+            "ASCII85Decode" | "A85" => {
+                data = ascii85_decode(&data).context("ascii85 content stream")?;
+            }
+            other => anyhow::bail!("unsupported stream filter: {other}"),
+        }
+    }
+    Ok(data)
+}
+
+/// Filter names in decode order (`/Filter` Name or Array thereof).
+fn filters_of(dict: &lopdf::Dictionary) -> Vec<String> {
+    let Ok(filter) = dict.get(b"Filter") else {
+        return Vec::new();
+    };
+    match filter {
+        Object::Name(name) => vec![String::from_utf8_lossy(name).into_owned()],
+        Object::Array(items) => items
+            .iter()
+            .filter_map(|f| match f {
+                Object::Name(name) => Some(String::from_utf8_lossy(name).into_owned()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
-fn has_flate_filter(dict: &lopdf::Dictionary) -> bool {
-    let Ok(filter) = dict.get(b"Filter") else {
-        return false;
-    };
-    match filter {
-        Object::Name(name) => name.as_slice() == b"FlateDecode".as_slice(),
-        Object::Array(items) => items
-            .iter()
-            .any(|f| matches!(f, Object::Name(n) if n.as_slice() == b"FlateDecode".as_slice())),
-        _ => false,
+/// Decode Adobe ASCII85 (`z` short form, `y` space form omitted per PDF spec
+/// — PDF uses `z` only; whitespace ignored; `<~`/`~>` markers stripped).
+fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>> {
+    let mut input = data;
+    if let Some(stripped) = input.strip_prefix(b"<~") {
+        input = stripped;
     }
+    if let Some(end) = input.windows(2).position(|w| w == b"~>") {
+        input = &input[..end];
+    }
+    let mut out = Vec::with_capacity(input.len());
+    let mut group: [u64; 5] = [0; 5];
+    let mut len = 0usize;
+    let flush = |group: &[u64; 5], len: usize, out: &mut Vec<u8>| {
+        let mut value = 0u64;
+        for (i, digit) in group.iter().enumerate() {
+            let digit = if i < len { *digit } else { 84 };
+            value = value * 85 + digit;
+        }
+        let bytes = (value as u32).to_be_bytes();
+        let emit = if len == 5 { 4 } else { len.saturating_sub(1) };
+        out.extend_from_slice(&bytes[..emit]);
+    };
+    for &byte in input {
+        if byte.is_ascii_whitespace() || byte == 0 {
+            continue;
+        }
+        if byte == b'z' {
+            if len != 0 {
+                anyhow::bail!("stray ASCII85 'z' inside group");
+            }
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            continue;
+        }
+        if !(b'!'..=b'u').contains(&byte) {
+            anyhow::bail!("invalid ASCII85 byte: {byte:#x}");
+        }
+        group[len] = u64::from(byte - b'!');
+        len += 1;
+        if len == 5 {
+            flush(&group, 5, &mut out);
+            len = 0;
+        }
+    }
+    if len == 1 {
+        anyhow::bail!("dangling ASCII85 group");
+    }
+    if len > 0 {
+        flush(&group, len, &mut out);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -569,5 +636,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ascii85_round_trip_vectors() {
+        // "Hello" per the Adobe reference example framing.
+        assert_eq!(ascii85_decode(b"87cURDZ").unwrap(), b"Hello");
+        assert_eq!(ascii85_decode(b"z").unwrap(), vec![0, 0, 0, 0]);
+        assert_eq!(ascii85_decode(b"<~87cURDZ~>").unwrap(), b"Hello");
+        assert!(ascii85_decode(b"v").is_err()); // dangling 1-char group
+        assert!(ascii85_decode(b"\x01").is_err());
     }
 }

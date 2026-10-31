@@ -1,5 +1,7 @@
 /target/
 **/target/
+# Wild-PDF corpus: multi-MB binaries, refetchable (see tests/wild/README.md)
+tests/wild/*.pdf
 __pycache__/
 *.pyc
 .venv/
