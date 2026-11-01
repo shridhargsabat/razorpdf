@@ -182,7 +182,7 @@ fn lines_and_tables_survive_zero_spans() {
     use razorpdf_core::geometry::table_grid::detect_all_tables;
 
     let page = empty_page();
-    let lines = merge_spans_to_lines(&page.spans);
+    let lines = merge_spans_to_lines(&page.spans).expect("merge");
     assert!(lines.is_empty());
     let tables = detect_all_tables(&page.vectors, &page.spans, &lines, 11.0, &page.filled_rects);
     assert!(tables.is_empty());
@@ -194,7 +194,7 @@ fn triage_scores_empty_page_without_nan() {
     use razorpdf_core::ParserConfig;
 
     let page = empty_page();
-    let verdict = score_page(&page, &ParserConfig::default());
+    let verdict = score_page(&page, &ParserConfig::default()).expect("score");
     assert!(verdict.score.is_finite(), "non-finite page score");
     assert!(
         verdict.fallback_regions.iter().all(|r| r.score.is_finite()),

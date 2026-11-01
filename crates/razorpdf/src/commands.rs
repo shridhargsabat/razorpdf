@@ -87,7 +87,7 @@ pub fn inspect(input: &str) -> Result<()> {
         "page", "spans", "vectors", "lines", "tables", "med_font", "S(R)", "regions"
     );
     for page in &pages {
-        let lines = geometry::merge_spans_to_lines(&page.spans);
+        let lines = geometry::merge_spans_to_lines(&page.spans)?;
         let med = geometry::median_font_size(&lines);
         let tables = geometry::detect_all_tables(
             &page.vectors,
@@ -96,7 +96,7 @@ pub fn inspect(input: &str) -> Result<()> {
             geometry::body_font_size(&lines),
             &page.filled_rects,
         );
-        let triage = triage::score_page(page, &config);
+        let triage = triage::score_page(page, &config)?;
         let verdict = if triage.fallback_regions.is_empty() {
             "fast"
         } else {

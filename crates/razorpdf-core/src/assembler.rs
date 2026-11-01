@@ -48,8 +48,8 @@ where
     // block layout below.
     let triaged_lines: Vec<(PageTriage, Vec<crate::geometry::lines::TextLine>)> = pages
         .par_iter()
-        .map(|p| {
-            let lines = geometry::merge_spans_to_lines(&p.spans);
+        .map(|p| -> anyhow::Result<_> {
+            let lines = geometry::merge_spans_to_lines(&p.spans)?;
             let mut verdict = triage::score_page_with_lines(p, &lines, config);
             if !verdict.fallback_regions.is_empty() {
                 let tables = geometry::detect_all_tables(
@@ -67,9 +67,9 @@ where
                     })
                 });
             }
-            (verdict, lines)
+            Ok((verdict, lines))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let mut triaged: Vec<PageTriage> = Vec::with_capacity(pages.len());
     let mut all_lines: Vec<Vec<crate::geometry::lines::TextLine>> = Vec::with_capacity(pages.len());
     for (verdict, lines) in triaged_lines {

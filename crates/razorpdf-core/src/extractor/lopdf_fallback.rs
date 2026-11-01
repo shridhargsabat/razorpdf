@@ -42,7 +42,7 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
         let (ml, mb, mr, mt) = media_box(page_dict);
         let fonts = font_map(&doc, page_dict).unwrap_or_default();
         let content_bytes = page_content(&doc, page_dict).context("page contents")?;
-        let (forms, images) = collect_xobjects(&doc, page_dict, &fonts);
+        let (forms, images) = collect_xobjects(&doc, page_dict, &fonts)?;
         inputs.push(PageInput {
             page_index,
             origin_x: ml,
@@ -68,7 +68,7 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
                 input.images,
             );
             for op in &content.operations {
-                state.apply(op);
+                state.apply(op)?;
             }
             Ok(RawPageElements {
                 page_index: input.page_index,
@@ -347,7 +347,7 @@ fn collect_xobjects(
     doc: &Document,
     page: &lopdf::Dictionary,
     page_fonts: &BTreeMap<String, FontInfo>,
-) -> XObjectMaps {
+) -> Result<XObjectMaps> {
     let resources = page
         .get(b"Resources")
         .ok()
@@ -357,7 +357,7 @@ fn collect_xobjects(
             _ => None,
         });
     let Some(resources) = resources else {
-        return (HashMap::new(), HashMap::new());
+        return Ok((HashMap::new(), HashMap::new()));
     };
     collect_xobjects_in(doc, resources, page_fonts, 0, &mut HashSet::new())
 }
@@ -369,11 +369,11 @@ fn collect_xobjects_in(
     fallback_fonts: &BTreeMap<String, FontInfo>,
     depth: u8,
     visited: &mut HashSet<ObjectId>,
-) -> XObjectMaps {
+) -> Result<XObjectMaps> {
     let mut forms = HashMap::new();
     let mut images = HashMap::new();
     if depth > 4 {
-        return (forms, images);
+        return Ok((forms, images));
     }
     let xobjects = resources
         .get(b"XObject")
@@ -384,7 +384,7 @@ fn collect_xobjects_in(
             _ => None,
         });
     let Some(xobjects) = xobjects else {
-        return (forms, images);
+        return Ok((forms, images));
     };
     for (key, val) in xobjects.iter() {
         if let Object::Reference(id) = val {
@@ -443,14 +443,14 @@ fn collect_xobjects_in(
         if let Ok(own) = font_map_from_resources(doc, form_resources) {
             fonts.extend(own);
         }
-        let Ok(content_bytes) = stream_bytes(stream) else {
-            continue;
-        };
-        let Ok(content) = Content::decode(&content_bytes) else {
-            continue;
-        };
+        // A form that EXISTS but won't decode is data loss, not absence:
+        // propagate like the page level instead of skipping silently.
+        let content_bytes =
+            stream_bytes(stream).with_context(|| format!("form {name} content stream"))?;
+        let content = Content::decode(&content_bytes)
+            .with_context(|| format!("form {name} content operations"))?;
         let (nested_forms, nested_images) =
-            collect_xobjects_in(doc, form_resources, &fonts, depth + 1, visited);
+            collect_xobjects_in(doc, form_resources, &fonts, depth + 1, visited)?;
         forms.insert(
             name,
             Arc::new(FormXObject {
@@ -462,7 +462,7 @@ fn collect_xobjects_in(
             }),
         );
     }
-    (forms, images)
+    Ok((forms, images))
 }
 
 /// Parse a 6-element matrix array (identity fallback per component).
@@ -492,6 +492,20 @@ fn obj_u32(obj: &Object) -> Option<u32> {
 /// 16 MiB per stream / 64 MiB concatenated is generous headroom.
 const MAX_INFLATED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PAGE_CONTENT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Embedded-image budget: pixel bytes clone per `Do` placement, so one
+/// 200KB image × 2000 placements materialized 400MB. Past 512MiB/page the
+/// placement keeps its bbox only. Generous: 512MiB of coded image bytes
+/// on one page is ~170 megapixels of RGB.
+const MAX_EMBEDDED_BYTES_PER_PAGE: usize = 512 * 1024 * 1024;
+
+/// Breadth-bomb budgets: N placements x K form ops emit N*K primitives
+/// (3.5KB -> 5K spans in ~20s; full-size input hangs). Past the cap the
+/// page hard-errors instead of materializing millions. Generous: real
+/// pages stay orders of magnitude below (tens of thousands at most).
+const MAX_SPANS_PER_PAGE: usize = 200_000;
+const MAX_VECTORS_PER_PAGE: usize = 500_000;
+const MAX_FILLS_PER_PAGE: usize = 200_000;
 
 /// Concatenate (and decompress when needed) a page's content streams.
 fn page_content(doc: &Document, page: &lopdf::Dictionary) -> Result<Vec<u8>> {
@@ -828,6 +842,7 @@ struct WalkState {
     scope_stack: Vec<ResourceScope>,
     image_bboxes: Vec<BBox>,
     embedded_images: Vec<EmbeddedImage>,
+    embedded_bytes: usize,
 }
 
 impl WalkState {
@@ -866,14 +881,15 @@ impl WalkState {
             scope_stack: Vec::new(),
             image_bboxes: Vec::new(),
             embedded_images: Vec::new(),
+            embedded_bytes: 0,
         }
     }
 
-    fn apply(&mut self, op: &lopdf::content::Operation) {
-        self.apply_with_depth(op, 0);
+    fn apply(&mut self, op: &lopdf::content::Operation) -> Result<()> {
+        self.apply_with_depth(op, 0)
     }
 
-    fn apply_with_depth(&mut self, op: &lopdf::content::Operation, depth: u8) {
+    fn apply_with_depth(&mut self, op: &lopdf::content::Operation, depth: u8) -> Result<()> {
         match op.operator.as_str() {
             "BT" => {
                 // BT resets the text matrix (but not the font/size).
@@ -952,7 +968,7 @@ impl WalkState {
             "Tj" => {
                 if let Some(obj) = op.operands.first() {
                     let text = self.decode_operand(obj);
-                    self.emit_text(&text);
+                    self.emit_text(&text)?;
                 }
             }
             "TJ" => {
@@ -970,21 +986,21 @@ impl WalkState {
                             _ => {}
                         }
                     }
-                    self.emit_text(&text);
+                    self.emit_text(&text)?;
                 }
             }
             "'" => {
                 self.ty -= self.leading;
                 if let Some(obj) = op.operands.first() {
                     let text = self.decode_operand(obj);
-                    self.emit_text(&text);
+                    self.emit_text(&text)?;
                 }
             }
             "\"" => {
                 self.ty -= self.leading;
                 if op.operands.len() >= 3 {
                     let text = self.decode_operand(&op.operands[2]);
-                    self.emit_text(&text);
+                    self.emit_text(&text)?;
                 }
             }
             "q" => {
@@ -1011,7 +1027,7 @@ impl WalkState {
             "Do" => {
                 if depth < MAX_FORM_DEPTH {
                     if let Some(name) = op.operands.first().map(obj_name_string) {
-                        self.invoke_xobject(name.trim_start_matches('/'), depth);
+                        self.invoke_xobject(name.trim_start_matches('/'), depth)?;
                     }
                 }
             }
@@ -1034,7 +1050,7 @@ impl WalkState {
                 if op.operands.len() >= 2 && self.has_point {
                     let x = obj_f32(&op.operands[0]).unwrap_or(0.0);
                     let y = obj_f32(&op.operands[1]).unwrap_or(0.0);
-                    self.emit_vector(self.cur_x, self.cur_y, x, y);
+                    self.emit_vector(self.cur_x, self.cur_y, x, y)?;
                     self.cur_x = x;
                     self.cur_y = y;
                 }
@@ -1049,23 +1065,24 @@ impl WalkState {
             }
             "S" | "s" => {
                 let rects = std::mem::take(&mut self.pending_rects);
-                self.stroke_rects(&rects);
+                self.stroke_rects(&rects)?;
             }
             "f" | "F" | "f*" => {
                 let rects = std::mem::take(&mut self.pending_rects);
-                self.fill_rects(&rects);
+                self.fill_rects(&rects)?;
             }
             "B" | "B*" | "b" | "b*" => {
                 // Drain once, apply to both: fill must not starve stroke.
                 let rects = std::mem::take(&mut self.pending_rects);
-                self.fill_rects(&rects);
-                self.stroke_rects(&rects);
+                self.fill_rects(&rects)?;
+                self.stroke_rects(&rects)?;
             }
             "n" => {
                 self.pending_rects.clear();
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Text-space offset → user-space offset through the Tm linear part.
@@ -1084,7 +1101,7 @@ impl WalkState {
     }
 
     /// Execute a Form XObject (scoped resources + matrix) or record an image.
-    fn invoke_xobject(&mut self, name: &str, depth: u8) {
+    fn invoke_xobject(&mut self, name: &str, depth: u8) -> Result<()> {
         // Clone the payload up front: one bytes copy per placement, and no
         // borrow held across the output pushes below.
         let hit = self
@@ -1105,20 +1122,27 @@ impl WalkState {
             );
             self.image_bboxes.push(bbox);
             if let Some(pixels) = pixels {
-                self.embedded_images.push(EmbeddedImage {
-                    bbox,
-                    width,
-                    height,
-                    codec: pixels.codec,
-                    layout: pixels.layout,
-                    bytes: pixels.bytes,
-                });
+                // Budget: pixel bytes clone once per placement, so N
+                // placements of one image cost N copies. Past the cap the
+                // placement keeps its bbox only (same fallback as
+                // unsupported encodings).
+                if self.embedded_bytes + pixels.bytes.len() <= MAX_EMBEDDED_BYTES_PER_PAGE {
+                    self.embedded_bytes += pixels.bytes.len();
+                    self.embedded_images.push(EmbeddedImage {
+                        bbox,
+                        width,
+                        height,
+                        codec: pixels.codec,
+                        layout: pixels.layout,
+                        bytes: pixels.bytes,
+                    });
+                }
             }
-            return;
+            return Ok(());
         }
         let form = self.forms.get(name).cloned();
         let Some(form) = form else {
-            return;
+            return Ok(());
         };
         self.scope_stack.push(ResourceScope {
             fonts: std::mem::take(&mut self.fonts),
@@ -1131,7 +1155,7 @@ impl WalkState {
         let saved_ctm = self.ctm;
         self.ctm = concat_matrix(self.ctm, form.matrix);
         for op in &form.ops {
-            self.apply_with_depth(op, depth + 1);
+            self.apply_with_depth(op, depth + 1)?;
         }
         self.ctm = saved_ctm;
         if let Some(scope) = self.scope_stack.pop() {
@@ -1139,6 +1163,7 @@ impl WalkState {
             self.forms = scope.forms;
             self.images = scope.images;
         }
+        Ok(())
     }
 
     /// Decode a text-showing operand through the current font (NFKC-normalized).
@@ -1154,9 +1179,9 @@ impl WalkState {
             .decode(&bytes)
     }
 
-    fn emit_text(&mut self, text: &str) {
+    fn emit_text(&mut self, text: &str) -> Result<()> {
         if text.is_empty() {
-            return;
+            return Ok(());
         }
         // Borrow font metadata: cloning FontInfo per span copies its whole
         // decoding tables (HashMap + 256-entry byte map).
@@ -1204,6 +1229,9 @@ impl WalkState {
             hx - self.origin_x,
             self.top_y - ly,
         );
+        if self.spans.len() >= MAX_SPANS_PER_PAGE {
+            anyhow::bail!("span budget exceeded: more than {MAX_SPANS_PER_PAGE} spans on one page");
+        }
         self.spans.push(TextSpan {
             text: text.to_string(),
             bbox,
@@ -1216,13 +1244,19 @@ impl WalkState {
         // Advance along the run direction for subsequent Tj in the block.
         self.tx += a * w;
         self.ty += b * w;
+        Ok(())
     }
 
-    fn emit_vector(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+    fn emit_vector(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) -> Result<()> {
         let (ax, ay) = transform_point(&self.ctm, x0, y0);
         let (bx, by) = transform_point(&self.ctm, x1, y1);
         let (lx, hx) = (ax.min(bx), ax.max(bx));
         let (ly, hy) = (ay.min(by), ay.max(by));
+        if self.vectors.len() >= MAX_VECTORS_PER_PAGE {
+            anyhow::bail!(
+                "vector budget exceeded: more than {MAX_VECTORS_PER_PAGE} vectors on one page"
+            );
+        }
         self.vectors.push(VectorSegment {
             x0: lx - self.origin_x,
             y0: self.top_y - hy,
@@ -1230,20 +1264,22 @@ impl WalkState {
             y1: self.top_y - ly,
             stroke_width: self.line_width,
         });
+        Ok(())
     }
 
     /// Stroke the given `re` rects as 4 segments each.
-    fn stroke_rects(&mut self, rects: &[[f32; 4]]) {
+    fn stroke_rects(&mut self, rects: &[[f32; 4]]) -> Result<()> {
         for &[x, y, w, h] in rects {
-            self.emit_vector(x, y, x + w, y);
-            self.emit_vector(x + w, y, x + w, y + h);
-            self.emit_vector(x + w, y + h, x, y + h);
-            self.emit_vector(x, y + h, x, y);
+            self.emit_vector(x, y, x + w, y)?;
+            self.emit_vector(x + w, y, x + w, y + h)?;
+            self.emit_vector(x + w, y + h, x, y + h)?;
+            self.emit_vector(x, y + h, x, y)?;
         }
+        Ok(())
     }
 
     /// Record the given `re` rects as filled bboxes (CTM-transformed).
-    fn fill_rects(&mut self, rects: &[[f32; 4]]) {
+    fn fill_rects(&mut self, rects: &[[f32; 4]]) -> Result<()> {
         for &[x, y, w, h] in rects {
             let (ax, ay) = transform_point(&self.ctm, x, y);
             let (bx, by) = transform_point(&self.ctm, x + w, y + h);
@@ -1252,6 +1288,11 @@ impl WalkState {
             if hx - lx < 0.5 || hy - ly < 0.5 {
                 continue; // degenerate sliver, not a shaded cell
             }
+            if self.filled_rects.len() >= MAX_FILLS_PER_PAGE {
+                anyhow::bail!(
+                    "fill budget exceeded: more than {MAX_FILLS_PER_PAGE} fills on one page"
+                );
+            }
             self.filled_rects.push(BBox::new(
                 lx - self.origin_x,
                 self.top_y - hy,
@@ -1259,6 +1300,7 @@ impl WalkState {
                 self.top_y - ly,
             ));
         }
+        Ok(())
     }
 }
 

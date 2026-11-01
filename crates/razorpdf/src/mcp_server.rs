@@ -205,7 +205,7 @@ async fn tool_inspect_pdf_layout(args: &Value) -> Result<String, String> {
     let pages = extractor::extract_document(&bytes, &path).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for page in &pages {
-        let lines = geometry::merge_spans_to_lines(&page.spans);
+        let lines = geometry::merge_spans_to_lines(&page.spans).map_err(|e| e.to_string())?;
         let median_font = geometry::body_font_size(&lines);
         let tables = geometry::detect_all_tables(
             &page.vectors,
@@ -214,7 +214,7 @@ async fn tool_inspect_pdf_layout(args: &Value) -> Result<String, String> {
             median_font,
             &page.filled_rects,
         );
-        let verdict = triage::score_page(page, &config);
+        let verdict = triage::score_page(page, &config).map_err(|e| e.to_string())?;
         out.push(json!({
             "page_index": page.page_index,
             "width": page.width,
@@ -249,7 +249,7 @@ async fn tool_extract_pdf_tables(args: &Value) -> Result<String, String> {
     let mut tables_out = Vec::new();
 
     for page in &pages {
-        let lines = geometry::merge_spans_to_lines(&page.spans);
+        let lines = geometry::merge_spans_to_lines(&page.spans).map_err(|e| e.to_string())?;
         let median_font = geometry::body_font_size(&lines);
         for table in geometry::detect_all_tables(
             &page.vectors,
@@ -268,7 +268,7 @@ async fn tool_extract_pdf_tables(args: &Value) -> Result<String, String> {
                 "markdown": geometry::table_grid::detected_table_to_markdown(&table),
             }));
         }
-        let verdict = triage::score_page(page, &config);
+        let verdict = triage::score_page(page, &config).map_err(|e| e.to_string())?;
         let needs_canvas = use_mock
             && verdict.fallback_regions.iter().any(|r| {
                 matches!(

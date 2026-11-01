@@ -14,7 +14,7 @@ fn gate3_clean_pages_take_fast_path() {
         ("bordered", test_fixtures::bordered_table_pdf()),
     ] {
         let page = lopdf_fallback::extract_page(&pdf, 0).expect("extract");
-        let verdict = triage::score_page(&page, &config);
+        let verdict = triage::score_page(&page, &config).expect("score");
         assert!(
             verdict.score < config.triage_threshold,
             "{name}: S={} must be < {}",
@@ -38,7 +38,7 @@ fn gate3_messy_triggers_table_region() {
     let config = ParserConfig::default();
     let pdf = test_fixtures::messy_overlap_table_pdf();
     let page = lopdf_fallback::extract_page(&pdf, 0).expect("extract");
-    let verdict = triage::score_page(&page, &config);
+    let verdict = triage::score_page(&page, &config).expect("score");
 
     assert!(
         verdict.score >= config.triage_threshold,

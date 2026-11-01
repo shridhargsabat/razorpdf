@@ -9,7 +9,7 @@ fn gate2_two_col_reading_order() {
     let pages = lopdf_fallback::extract_document(&pdf, "two_col").expect("extract");
     assert_eq!(pages.len(), 1);
 
-    let lines = geometry::merge_spans_to_lines(&pages[0].spans);
+    let lines = geometry::merge_spans_to_lines(&pages[0].spans).expect("merge");
     assert_eq!(lines.len(), 33, "title + 32 column lines");
 
     let order = geometry::reading_order(&lines, &ParserConfig::default());
@@ -48,7 +48,7 @@ fn gate2_single_col_headings() {
     let pdf = test_fixtures::single_col_clean_pdf();
     let page = lopdf_fallback::extract_page(&pdf, 0).expect("extract");
 
-    let lines = geometry::merge_spans_to_lines(&page.spans);
+    let lines = geometry::merge_spans_to_lines(&page.spans).expect("merge");
     assert_eq!(lines.len(), 17);
 
     let median = geometry::median_font_size(&lines);
