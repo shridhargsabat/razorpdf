@@ -560,7 +560,7 @@ fn stream_bytes(stream: &lopdf::Stream) -> Result<Vec<u8>> {
             "ASCII85Decode" | "A85" => {
                 data = ascii85_decode(&data).context("ascii85 content stream")?;
             }
-            other => anyhow::bail!("unsupported stream filter: {other}"),
+            other => anyhow::bail!("unsupported stream filter: {other:.64}"),
         }
     }
     Ok(data)

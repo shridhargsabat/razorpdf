@@ -388,6 +388,29 @@ fn form_with_unsupported_filter_errors_loudly() {
 }
 
 #[test]
+fn giant_filter_name_is_truncated_in_errors() {
+    // HG-10: a 1MB /Filter name was interpolated whole into the error
+    // string (1MB stderr / MCP isError payload). Reflected names truncate.
+    let big: &'static str = Box::leak("F".repeat(1_000_000).into_boxed_str());
+    let pdf = build_pdf(
+        vec![PageDef {
+            content: b"BT /F1 11 Tf 1 0 0 1 72 700 Tm (x) Tj ET\n".to_vec(),
+            filter: Some(big),
+            mediabox: LETTER,
+            extra: vec![],
+        }],
+        vec![],
+        vec![],
+    );
+    let err = format!("{:?}", extract_document(&pdf, "bigfilter.pdf").unwrap_err());
+    assert!(
+        err.len() < 2000,
+        "error must truncate the name, got {} bytes",
+        err.len()
+    );
+}
+
+#[test]
 fn embedded_image_bytes_are_budgeted_per_page() {
     use flate2::write::ZlibEncoder;
     use std::io::Write as _;

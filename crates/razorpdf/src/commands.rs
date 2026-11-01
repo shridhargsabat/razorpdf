@@ -87,7 +87,8 @@ pub fn inspect(input: &str) -> Result<()> {
         "page", "spans", "vectors", "lines", "tables", "med_font", "S(R)", "regions"
     );
     for page in &pages {
-        let lines = geometry::merge_spans_to_lines(&page.spans)?;
+        let lines =
+            geometry::merge_spans_to_lines_with_threshold(&page.spans, config.line_merge_overlap)?;
         let med = geometry::median_font_size(&lines);
         let tables = geometry::detect_all_tables(
             &page.vectors,
