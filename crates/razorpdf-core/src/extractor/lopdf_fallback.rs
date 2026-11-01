@@ -482,6 +482,12 @@ fn obj_u32(obj: &Object) -> Option<u32> {
     }
 }
 
+/// Decompression-bomb guards: a hostile `/FlateDecode` stream can claim
+/// gigabytes from kilobytes of input. Real content streams are kilobytes;
+/// 16 MiB per stream / 64 MiB concatenated is generous headroom.
+const MAX_INFLATED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PAGE_CONTENT_BYTES: usize = 64 * 1024 * 1024;
+
 /// Concatenate (and decompress when needed) a page's content streams.
 fn page_content(doc: &Document, page: &lopdf::Dictionary) -> Result<Vec<u8>> {
     let contents = page.get(b"Contents").context("no contents")?;
@@ -491,7 +497,16 @@ fn page_content(doc: &Document, page: &lopdf::Dictionary) -> Result<Vec<u8>> {
             let mut out = Vec::new();
             for item in items {
                 match resolve(doc, item)? {
-                    Object::Stream(s) => out.extend_from_slice(&stream_bytes(s)?),
+                    Object::Stream(s) => {
+                        let bytes = stream_bytes(s)?;
+                        if out.len() + bytes.len() > MAX_PAGE_CONTENT_BYTES {
+                            anyhow::bail!(
+                                "page contents exceed {} bytes total",
+                                MAX_PAGE_CONTENT_BYTES
+                            );
+                        }
+                        out.extend_from_slice(&bytes);
+                    }
                     _ => anyhow::bail!("contents array item is not a stream"),
                 }
             }
@@ -511,8 +526,16 @@ fn stream_bytes(stream: &lopdf::Stream) -> Result<Vec<u8>> {
                 let mut decoder = flate2::read::ZlibDecoder::new(&data[..]);
                 let mut buf = Vec::new();
                 decoder
+                    .by_ref()
+                    .take(MAX_INFLATED_BYTES as u64 + 1)
                     .read_to_end(&mut buf)
                     .context("inflate content stream")?;
+                if buf.len() > MAX_INFLATED_BYTES {
+                    anyhow::bail!(
+                        "content stream exceeds {} bytes inflated",
+                        MAX_INFLATED_BYTES
+                    );
+                }
                 data = buf;
             }
             "ASCII85Decode" | "A85" => {

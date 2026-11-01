@@ -136,7 +136,9 @@ impl FontDecoding {
         }
         for (lo, hi, base, width) in &self.range_rules {
             if *lo <= code && code <= *hi {
-                return Some(Cow::Owned(int_to_utf16(*width, base + (code - lo))));
+                // Wrapping: hostile CMaps set dst bases near u32::MAX.
+                let dst = base.wrapping_add(code - lo);
+                return Some(Cow::Owned(int_to_utf16(*width, dst)));
             }
         }
         if len == 1 {
@@ -672,13 +674,15 @@ pub fn parse_tounicode_cmap(data: &[u8]) -> ToUnicodeCMap {
                                         break;
                                     }
                                     CmapToken::Hex(dst) => {
-                                        cmap.direct.insert(lo + step, utf16be_to_string(dst));
+                                        // Wrapping: hostile CMaps set lo near u32::MAX.
+                                        cmap.direct
+                                            .insert(lo.wrapping_add(step), utf16be_to_string(dst));
                                         step += 1;
                                         k += 1;
                                     }
                                     CmapToken::Literal(dst) => {
                                         cmap.direct.insert(
-                                            lo + step,
+                                            lo.wrapping_add(step),
                                             String::from_utf8_lossy(dst).into_owned(),
                                         );
                                         step += 1;

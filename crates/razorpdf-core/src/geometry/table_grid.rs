@@ -1244,7 +1244,25 @@ pub fn detected_table_to_markdown(table: &DetectedTable) -> String {
     if table.rows.is_empty() || table.n_cols() == 0 {
         return String::new();
     }
-    let esc = |s: &str| s.replace('|', "\\|").replace('\n', "<br>");
+    let esc = |s: &str| {
+        // Single pass: escape table pipes, fold \r\n / \r / \n to <br>.
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '|' => out.push_str("\\|"),
+                '\r' => {
+                    out.push_str("<br>");
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                }
+                '\n' => out.push_str("<br>"),
+                c => out.push(c),
+            }
+        }
+        out
+    };
     let mut out = String::new();
     let (header, body): (&[String], &[Vec<String>]) = if table.has_header {
         (&table.rows[0], &table.rows[1..])

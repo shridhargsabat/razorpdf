@@ -34,6 +34,12 @@ pub fn region_to_pixels(
     (px0, py0, px1.saturating_sub(px0), py1.saturating_sub(py0))
 }
 
+/// Largest synthetic canvas in pixels (16 MP ≈ 48 MiB RGB): hostile
+/// MediaBox dimensions (e.g. 1e7pt, which parses fine) would otherwise
+/// abort on a terabyte-scale `RgbImage` allocation. Oversized pages are
+/// scaled down preserving aspect ratio; VLM crops stay proportional.
+const MAX_CANVAS_PIXELS: u64 = 16_777_216;
+
 /// Render a deterministic synthetic canvas of the page at `dpi`.
 ///
 /// White background; text spans become gray bars (darker when bold),
@@ -42,9 +48,17 @@ pub fn region_to_pixels(
 /// supported (JPEG, Flate/Raw RGB+Gray).
 #[must_use]
 pub fn render_synthetic_canvas(page: &RawPageElements, dpi: u32) -> RgbImage {
-    let scale = dpi.max(1) as f32 / 72.0;
-    let w = (page.width * scale).ceil().max(1.0) as u32;
-    let h = (page.height * scale).ceil().max(1.0) as u32;
+    let mut scale = dpi.max(1) as f32 / 72.0;
+    let mut w = (page.width * scale).ceil().max(1.0);
+    let mut h = (page.height * scale).ceil().max(1.0);
+    let area = (w as f64) * (h as f64);
+    if area > MAX_CANVAS_PIXELS as f64 {
+        let shrink = (MAX_CANVAS_PIXELS as f64 / area).sqrt() as f32;
+        scale *= shrink;
+        w = (page.width * scale).ceil().max(1.0);
+        h = (page.height * scale).ceil().max(1.0);
+    }
+    let (w, h) = (w as u32, h as u32);
     let mut img = RgbImage::from_pixel(w, h, Rgb([255, 255, 255]));
 
     for bbox in &page.image_bboxes {
