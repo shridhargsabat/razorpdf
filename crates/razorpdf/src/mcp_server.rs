@@ -205,11 +205,9 @@ async fn tool_inspect_pdf_layout(args: &Value) -> Result<String, String> {
     let pages = extractor::extract_document(&bytes, &path).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for page in &pages {
-        let lines = geometry::merge_spans_to_lines_with_threshold(
-            &page.spans,
-            config.line_merge_overlap,
-        )
-        .map_err(|e| e.to_string())?;
+        let lines =
+            geometry::merge_spans_to_lines_with_threshold(&page.spans, config.line_merge_overlap)
+                .map_err(|e| e.to_string())?;
         let median_font = geometry::body_font_size(&lines);
         let tables = geometry::detect_all_tables(
             &page.vectors,
@@ -253,11 +251,9 @@ async fn tool_extract_pdf_tables(args: &Value) -> Result<String, String> {
     let mut tables_out = Vec::new();
 
     for page in &pages {
-        let lines = geometry::merge_spans_to_lines_with_threshold(
-            &page.spans,
-            config.line_merge_overlap,
-        )
-        .map_err(|e| e.to_string())?;
+        let lines =
+            geometry::merge_spans_to_lines_with_threshold(&page.spans, config.line_merge_overlap)
+                .map_err(|e| e.to_string())?;
         let median_font = geometry::body_font_size(&lines);
         for table in geometry::detect_all_tables(
             &page.vectors,

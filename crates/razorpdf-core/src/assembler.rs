@@ -49,10 +49,8 @@ where
     let triaged_lines: Vec<(PageTriage, Vec<crate::geometry::lines::TextLine>)> = pages
         .par_iter()
         .map(|p| -> anyhow::Result<_> {
-            let lines = geometry::merge_spans_to_lines_with_threshold(
-                &p.spans,
-                config.line_merge_overlap,
-            )?;
+            let lines =
+                geometry::merge_spans_to_lines_with_threshold(&p.spans, config.line_merge_overlap)?;
             let mut verdict = triage::score_page_with_lines(p, &lines, config);
             if !verdict.fallback_regions.is_empty() {
                 let tables = geometry::detect_all_tables(
