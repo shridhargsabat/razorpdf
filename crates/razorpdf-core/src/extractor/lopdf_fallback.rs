@@ -29,6 +29,11 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
     let pages = doc.get_pages();
     let mut order: Vec<(u32, ObjectId)> = pages.into_iter().collect();
     order.sort_by_key(|(n, _)| *n);
+    if order.is_empty() {
+        // A corrupt catalog/trailer can parse "successfully" with zero
+        // pages; succeeding with empty output would be silent data loss.
+        anyhow::bail!("no pages found in document");
+    }
 
     let mut inputs = Vec::with_capacity(order.len());
     for (page_index, (_, id)) in order.iter().enumerate() {
