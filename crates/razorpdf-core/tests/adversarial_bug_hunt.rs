@@ -258,6 +258,28 @@ fn cmap_bfrange_lookup_overflow_does_not_panic() {
 }
 
 #[test]
+fn cmap_lone_delimiters_terminate_with_bounded_tokens() {
+    use razorpdf_core::extractor::fonts::parse_tounicode_cmap;
+
+    // Fuzzer find: a lone `>`, `)`, `{`, `}` fell into the word arm with
+    // zero bytes consumed, pushing empty words forever (4GB+ token vec,
+    // host OOM, gateway kill). Any of these must return promptly.
+    for junk in [
+        b">>>))){{{}}}".as_slice(),
+        b">",
+        b")",
+        b"1 beginbfchar\n> ) <0041>\nendbfchar",
+        b"\x00\x01\x02><(){}[]/%\xff\xfe",
+    ] {
+        let cmap = parse_tounicode_cmap(junk);
+        assert!(
+            cmap.direct.len() + cmap.range_rules.len() <= junk.len(),
+            "unbounded CMap output for {junk:?}"
+        );
+    }
+}
+
+#[test]
 fn cmap_bfrange_array_overflow_does_not_panic() {
     use razorpdf_core::extractor::fonts::parse_tounicode_cmap;
 
@@ -434,4 +456,43 @@ fn garbage_bytes_error_cleanly() {
     assert!(extract_document(b"not a pdf at all", "junk.pdf").is_err());
     assert!(extract_document(b"", "empty.pdf").is_err());
     assert!(extract_document(b"%PDF-1.7\ntrailerless", "short.pdf").is_err());
+}
+
+#[test]
+fn destroyed_catalog_errors_instead_of_empty_success() {
+    // Fuzzer find: a splice that wipes the catalog object used to parse as
+    // zero pages with exit 0 and empty output (silent data loss). Same
+    // length replacement keeps xref offsets valid, isolating the catalog.
+    let pdf = build_pdf(
+        vec![PageDef {
+            content: b"BT /F1 11 Tf 1 0 0 1 72 700 Tm (invoice) Tj ET\n".to_vec(),
+            filter: None,
+            mediabox: LETTER,
+            extra: vec![],
+        }],
+        vec![FontDef {
+            name: "F1",
+            to_unicode: None,
+        }],
+        vec![],
+    );
+    // lopdf serializes dicts without spaces: `<</Type/Catalog`. Kill the
+    // catalog's opening `<<` (same length, xref intact): the object becomes
+    // unparseable and lopdf drops it, exactly like the fuzzer's splice.
+    let needle = b"/Type/Catalog";
+    let mut broken = pdf.clone();
+    let mut mangled = false;
+    for (i, w) in pdf.windows(needle.len()).enumerate() {
+        if w == needle {
+            broken[i - 2] = b'X';
+            broken[i - 1] = b'X';
+            mangled = true;
+        }
+    }
+    assert!(mangled, "fixture must actually mangle the catalog");
+    let err = extract_document(&broken, "nocat.pdf").expect_err("must not succeed");
+    assert!(
+        format!("{err:?}").to_lowercase().contains("page"),
+        "unexpected error: {err:?}"
+    );
 }

@@ -861,6 +861,19 @@ fn tokenize_cmap(data: &[u8]) -> Vec<CmapToken> {
         while i < data.len() && !is_delim(data[i]) {
             i += 1;
         }
+        if start == i {
+            // Lone delimiter (>, ), {, }) with no owning construct:
+            // skipping it guarantees the loop always makes progress.
+            // (Pushing an empty word here used to loop forever, growing
+            // the token vec to 4GB+ on garbage CMap bytes.)
+            i += 1;
+            continue;
+        }
+        // A byte-consuming tokenizer can never emit more tokens than input
+        // bytes; enforce it so any future non-advancing path fails safe.
+        if tokens.len() >= data.len() {
+            break;
+        }
         let word = String::from_utf8_lossy(&data[start..i]).into_owned();
         match word.parse::<i64>() {
             Ok(number) => tokens.push(CmapToken::Int(number)),
