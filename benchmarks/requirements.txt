@@ -1,0 +1,6 @@
+# Pinned comparison harness: razorpdf (PyPI) vs PyMuPDF.
+# Pins are exact on purpose -- these tests compare fixed releases, so any
+# output drift (either library) must fail loudly and update the report.
+razorpdf==0.1.4
+pymupdf==2.0
+pytest==9.2.0
