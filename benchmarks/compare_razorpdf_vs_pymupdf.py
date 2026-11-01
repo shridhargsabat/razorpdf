@@ -24,7 +24,7 @@ def median_of(fn, n=REPEATS):
 
 
 def collect(root: Path):
-    import fitz
+    import pymupdf
 
     import razorpdf
 
@@ -41,7 +41,7 @@ def collect(root: Path):
 
         def mu_go(p=path):
             t = time.perf_counter()
-            with fitz.open(p) as d:
+            with pymupdf.open(p) as d:
                 for page in d:
                     page.get_text()
             return time.perf_counter() - t
@@ -50,7 +50,7 @@ def collect(root: Path):
         mu_ms = median_of(mu_go) * 1000
         md = razorpdf.to_markdown(path)
         doc = razorpdf.parse_file(path)
-        with fitz.open(path) as d:
+        with pymupdf.open(path) as d:
             mu_tables = sum(len(list(p.find_tables())) for p in d)
         pipes = sum(1 for ln in md.splitlines() if ln.startswith("|"))
         rows.append(

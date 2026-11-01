@@ -66,11 +66,11 @@ def parsed():
 
 @pytest.fixture(scope="module")
 def mu_tables():
-    import fitz
+    import pymupdf
 
     out = {}
     for stem in EXPECTED:
-        with fitz.open(str(WILD / f"{stem}.pdf")) as d:
+        with pymupdf.open(str(WILD / f"{stem}.pdf")) as d:
             out[stem] = sum(len(list(p.find_tables())) for p in d)
     return out
 
@@ -130,12 +130,12 @@ def test_pymupdf_table_counts(mu_tables):
 
 def test_ruled_table_parity(parsed):
     # GST 9-col ruled table: both libraries grid it.
-    import fitz
+    import pymupdf
 
     md_rows = pipe_rows(parsed["gst_tax_invoice"]["markdown"])
     assert len(md_rows) == 4  # header + separator + 2 data rows
     assert md_rows[0].count("|") == 10  # 9 columns
-    with fitz.open(str(WILD / "gst_tax_invoice.pdf")) as d:
+    with pymupdf.open(str(WILD / "gst_tax_invoice.pdf")) as d:
         (table,) = list(d[0].find_tables())
         assert (table.row_count, table.col_count) == (3, 9)
 

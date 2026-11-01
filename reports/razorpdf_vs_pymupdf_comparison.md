@@ -1,6 +1,6 @@
 # razorpdf vs PyMuPDF (library comparison)
 
-Generated: 2026-11-01 18:45 UTC by `benchmarks/compare_razorpdf_vs_pymupdf.py`.
+Generated: 2026-11-01 18:50 UTC by `benchmarks/compare_razorpdf_vs_pymupdf.py`.
 Environment: Python 3.12.3 on Linux x86_64, razorpdf==0.1.4, pymupdf==2.0.
 Timing is median-of-5 per file on this box; re-run to reproduce.
 
@@ -16,12 +16,12 @@ point of the timing table.
 
 | file | pages | razorpdf to_markdown | pymupdf get_text | faster |
 |---|---|---|---|---|
-| arxiv_attention_2col | 15 | 92.9 | 131.6 | razorpdf |
-| arxiv_deepseek_tables | 86 | 142.8 | 197.0 | razorpdf |
-| financial_borderless_watermark | 1 | 0.2 | 1.7 | razorpdf |
-| gst_tax_invoice | 1 | 0.4 | 1.7 | razorpdf |
-| mozilla_tracemonkey_2col | 14 | 53.1 | 67.8 | razorpdf |
-| **total** | | **289.4** | **399.9** | |
+| arxiv_attention_2col | 15 | 93.9 | 112.7 | razorpdf |
+| arxiv_deepseek_tables | 86 | 167.8 | 194.5 | razorpdf |
+| financial_borderless_watermark | 1 | 0.2 | 1.8 | razorpdf |
+| gst_tax_invoice | 1 | 0.3 | 2.0 | razorpdf |
+| mozilla_tracemonkey_2col | 14 | 58.9 | 67.5 | razorpdf |
+| **total** | | **321.2** | **378.5** | |
 
 razorpdf faster-or-equal on 5/5 files.
 
