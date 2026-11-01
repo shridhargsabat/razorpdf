@@ -201,7 +201,25 @@ pub fn render_page_via_pdftoppm(pdf: &[u8], page_index: usize, dpi: u32) -> Opti
     let _cleanup = Cleanup {
         paths: vec![input.clone(), out_png.clone()],
     };
-    std::fs::write(&input, pdf).ok()?;
+    // O_EXCL on both paths: the pid.tag names are predictable inside the
+    // world-writable temp dir, so a planted symlink must fail closed
+    // instead of redirecting our bytes (CWE-59).
+    {
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&input)
+            .and_then(|mut f| f.write_all(pdf))
+            .ok()?;
+    }
+    // Reserve the output path before pdftoppm runs so it cannot be a
+    // planted symlink either (pdftoppm truncates and overwrites it).
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&out_png)
+        .ok()?;
     let page_no = page_index.checked_add(1)?; // pdftoppm is 1-based
     let mut child = Command::new("pdftoppm")
         .args([
@@ -241,6 +259,7 @@ pub fn render_page_via_pdftoppm(pdf: &[u8], page_index: usize, dpi: u32) -> Opti
             }
             Err(_) => {
                 let _ = child.kill();
+                let _ = child.wait(); // don't leak a zombie on the error path
                 return None;
             }
         }
