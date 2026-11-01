@@ -259,7 +259,6 @@ pub fn render_page_via_pdftoppm(pdf: &[u8], page_index: usize, dpi: u32) -> Opti
             }
             Err(_) => {
                 let _ = child.kill();
-                let _ = child.wait(); // don't leak a zombie on the error path
                 return None;
             }
         }
