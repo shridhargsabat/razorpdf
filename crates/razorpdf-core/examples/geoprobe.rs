@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
     for (y, n) in top.iter().take(8) {
         println!("  y={y} n={n}");
     }
-    let lines = razorpdf_core::geometry::merge_spans_to_lines(&p.spans);
+    let lines = razorpdf_core::geometry::merge_spans_to_lines(&p.spans)?;
     println!("--- lines: {}", lines.len());
     let mut sizes: Vec<f32> = lines.iter().map(|l| l.font_size).collect();
     sizes.sort_by(|a, b| a.partial_cmp(b).unwrap());

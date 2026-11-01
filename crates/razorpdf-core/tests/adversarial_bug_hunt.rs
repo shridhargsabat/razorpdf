@@ -25,6 +25,7 @@ struct FontDef {
 struct FormDef {
     name: &'static str,
     content: &'static str,
+    filter: Option<&'static str>,
 }
 
 struct PageDef {
@@ -69,6 +70,9 @@ fn build_pdf(pages: Vec<PageDef>, fonts: Vec<FontDef>, forms: Vec<FormDef>) -> V
                 Object::Integer(792),
             ]),
         );
+        if let Some(filter) = spec.filter {
+            form_dict.set("Filter", Object::Name(filter.as_bytes().to_vec()));
+        }
         let id = doc.add_object(Object::Stream(Stream::new(
             form_dict,
             spec.content.as_bytes().to_vec(),
@@ -330,6 +334,252 @@ fn cmap_bfrange_max_literal_does_not_panic() {
 }
 
 #[test]
+fn form_with_unsupported_filter_errors_loudly() {
+    // HG-06: a Form whose content can't be decoded (here /LZWDecode) was
+    // skipped with `continue` -> exit 0 with empty output, while the
+    // identical failure at page level hard-errors. Forms must match the
+    // page contract: loud error, never silent data loss.
+    let pdf = build_pdf(
+        vec![PageDef {
+            content: b"/Fm1 Do\n".to_vec(),
+            filter: None,
+            mediabox: LETTER,
+            extra: vec![],
+        }],
+        vec![FontDef {
+            name: "F1",
+            to_unicode: None,
+        }],
+        vec![FormDef {
+            name: "Fm1",
+            content: "BT /F1 11 Tf 1 0 0 1 72 700 Tm (form text here) Tj ET\n",
+            filter: Some("LZWDecode"),
+        }],
+    );
+    let err = format!("{:?}", extract_document(&pdf, "form-lzw.pdf").unwrap_err());
+    assert!(
+        err.contains("orm") || err.contains("ilter") || err.contains("ecode"),
+        "error must name the form/filter cause: {err}"
+    );
+
+    // Control: identical form without the filter extracts its text.
+    let pdf = build_pdf(
+        vec![PageDef {
+            content: b"/Fm1 Do\n".to_vec(),
+            filter: None,
+            mediabox: LETTER,
+            extra: vec![],
+        }],
+        vec![FontDef {
+            name: "F1",
+            to_unicode: None,
+        }],
+        vec![FormDef {
+            name: "Fm1",
+            content: "BT /F1 11 Tf 1 0 0 1 72 700 Tm (form text here) Tj ET\n",
+            filter: None,
+        }],
+    );
+    let pages = extract_document(&pdf, "form-plain.pdf").unwrap();
+    assert!(
+        pages[0].spans.iter().any(|s| s.text.contains("form text")),
+        "non-vacuous: plain form must extract"
+    );
+}
+
+#[test]
+fn embedded_image_bytes_are_budgeted_per_page() {
+    use flate2::write::ZlibEncoder;
+    use std::io::Write as _;
+
+    // HG-05: pixel bytes were cloned once per `Do` placement with no cap:
+    // a 200KB image x 2000 placements materialized 400MB (1500x). Past a
+    // per-page byte budget, placements keep their bbox only (the same
+    // fallback as unsupported encodings). NOTE: `bytes` are the coded
+    // stream bytes, so the fixture uses incompressible noise (zeros would
+    // flate to ~3KB and prove nothing).
+    let mut state: u64 = 0x12345678_9abcdef1;
+    let noise: Vec<u8> = (0..1000 * 1000 * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 37) as u8
+        })
+        .collect();
+    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(&noise).unwrap();
+    let compressed = enc.finish().unwrap();
+    assert!(
+        compressed.len() > 1_000_000,
+        "fixture must be incompressible, got {}",
+        compressed.len()
+    );
+    let mut img_dict = lopdf::Dictionary::new();
+    img_dict.set("Type", Object::Name(b"XObject".to_vec()));
+    img_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+    img_dict.set("Width", Object::Integer(1000));
+    img_dict.set("Height", Object::Integer(1000));
+    img_dict.set("ColorSpace", Object::Name(b"DeviceRGB".to_vec()));
+    img_dict.set("BitsPerComponent", Object::Integer(8));
+    img_dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+
+    let mut doc = Document::with_version("1.7");
+    let img_id = doc.add_object(Object::Stream(Stream::new(img_dict, compressed)));
+    let mut xmap = lopdf::Dictionary::new();
+    xmap.set("Im0", Object::Reference(img_id));
+    let mut resources = lopdf::Dictionary::new();
+    resources.set("XObject", Object::Dictionary(xmap));
+    let ops = "/Im0 Do\n".repeat(200);
+    let content_id = doc.add_object(Object::Stream(Stream::new(
+        dictionary! {},
+        ops.into_bytes(),
+    )));
+    let mut page = lopdf::Dictionary::new();
+    page.set("Type", Object::Name(b"Page".to_vec()));
+    page.set(
+        "MediaBox",
+        Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(612),
+            Object::Integer(792),
+        ]),
+    );
+    page.set("Resources", Object::Dictionary(resources));
+    page.set("Contents", Object::Reference(content_id));
+    let page_id = doc.add_object(Object::Dictionary(page));
+    let mut pages = lopdf::Dictionary::new();
+    pages.set("Type", Object::Name(b"Pages".to_vec()));
+    pages.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages.set("Count", Object::Integer(1));
+    let pages_id = doc.add_object(Object::Dictionary(pages));
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(page_id) {
+        d.set("Parent", Object::Reference(pages_id));
+    }
+    let mut catalog = lopdf::Dictionary::new();
+    catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+    catalog.set("Pages", Object::Reference(pages_id));
+    let catalog_id = doc.add_object(Object::Dictionary(catalog));
+    doc.trailer.set("Root", Object::Reference(catalog_id));
+    let mut pdf = Vec::new();
+    doc.save_to(&mut pdf).unwrap();
+
+    let pages = extract_document(&pdf, "imgclone.pdf").unwrap();
+    assert_eq!(
+        pages[0].image_bboxes.len(),
+        200,
+        "non-vacuous: all placements keep bboxes"
+    );
+    let total: usize = pages[0].embedded_images.iter().map(|e| e.bytes.len()).sum();
+    assert!(
+        total <= 512 * 1024 * 1024,
+        "embedded bytes over budget: {total}"
+    );
+    assert!(
+        pages[0].embedded_images.len() < 200,
+        "over-budget placements must fall back to bbox-only"
+    );
+}
+
+#[test]
+fn form_breadth_bomb_hits_per_page_budgets() {
+    // HG-04: N placements x K form ops emitted N*K spans/vectors/fills with
+    // no cap (3.5KB -> 5K spans in ~20s; full-size input hangs). Per-page
+    // budgets now hard-error past the cap instead of materializing millions.
+    let line = "BT /F1 11 Tf 1 0 0 1 72 700 Tm (breadth bomb line) Tj ET\n".repeat(100);
+    let form_content: &'static str = Box::leak(line.into_boxed_str());
+    let pdf = build_pdf(
+        vec![PageDef {
+            content: "/Fm1 Do\n".repeat(3000).into_bytes(),
+            filter: None,
+            mediabox: LETTER,
+            extra: vec![],
+        }],
+        vec![FontDef {
+            name: "F1",
+            to_unicode: None,
+        }],
+        vec![FormDef {
+            name: "Fm1",
+            content: form_content,
+            filter: None,
+        }],
+    );
+    let err = format!("{:?}", extract_document(&pdf, "bomb.pdf").unwrap_err());
+    assert!(err.contains("budget"), "must name the budget: {err}");
+
+    // Control: small bomb stays under budget and extracts fully.
+    let pdf = build_pdf(
+        vec![PageDef {
+            content: "/Fm1 Do\n".repeat(10).into_bytes(),
+            filter: None,
+            mediabox: LETTER,
+            extra: vec![],
+        }],
+        vec![FontDef {
+            name: "F1",
+            to_unicode: None,
+        }],
+        vec![FormDef {
+            name: "Fm1",
+            content: form_content,
+            filter: None,
+        }],
+    );
+    let pages = extract_document(&pdf, "small.pdf").unwrap();
+    assert_eq!(pages[0].spans.len(), 1000, "non-vacuous: 10x100 spans");
+}
+
+#[test]
+fn vector_and_fill_breadth_is_budgeted() {
+    // Same N*K shape through the vector and fill paths.
+    let vline = "72 700 m 100 700 l S\n".repeat(100);
+    let vform: &'static str = Box::leak(vline.into_boxed_str());
+    let pdf = build_pdf(
+        vec![PageDef {
+            content: "/Fm1 Do\n".repeat(6000).into_bytes(),
+            filter: None,
+            mediabox: LETTER,
+            extra: vec![],
+        }],
+        vec![FontDef {
+            name: "F1",
+            to_unicode: None,
+        }],
+        vec![FormDef {
+            name: "Fm1",
+            content: vform,
+            filter: None,
+        }],
+    );
+    let err = format!("{:?}", extract_document(&pdf, "vbomb.pdf").unwrap_err());
+    assert!(err.contains("budget"), "vectors must be budgeted: {err}");
+
+    let fline = "72 700 10 10 re f\n".repeat(100);
+    let fform: &'static str = Box::leak(fline.into_boxed_str());
+    let pdf = build_pdf(
+        vec![PageDef {
+            content: "/Fm1 Do\n".repeat(3000).into_bytes(),
+            filter: None,
+            mediabox: LETTER,
+            extra: vec![],
+        }],
+        vec![FontDef {
+            name: "F1",
+            to_unicode: None,
+        }],
+        vec![FormDef {
+            name: "Fm1",
+            content: fform,
+            filter: None,
+        }],
+    );
+    let err = format!("{:?}", extract_document(&pdf, "fbomb.pdf").unwrap_err());
+    assert!(err.contains("budget"), "fills must be budgeted: {err}");
+}
+
+#[test]
 fn cmap_bfrange_array_overflow_does_not_panic() {
     use razorpdf_core::extractor::fonts::parse_tounicode_cmap;
 
@@ -419,10 +669,12 @@ fn cyclic_form_xobjects_terminate() {
             FormDef {
                 name: "FA",
                 content: "BT /F1 11 Tf 1 0 0 1 72 700 Tm (A) Tj ET\n/FB Do\n",
+                filter: None,
             },
             FormDef {
                 name: "FB",
                 content: "BT /F1 11 Tf 1 0 0 1 72 680 Tm (B) Tj ET\n/FA Do\n",
+                filter: None,
             },
         ],
     );
@@ -449,6 +701,7 @@ fn self_referential_form_terminates() {
         vec![FormDef {
             name: "FS",
             content: "BT /F1 11 Tf 1 0 0 1 72 700 Tm (S) Tj ET\n/FS Do\n",
+            filter: None,
         }],
     );
     let pages = extract_document(&pdf, "self.pdf").expect("self-cycle must terminate");

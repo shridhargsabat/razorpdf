@@ -5,9 +5,16 @@
 //! via median body font size analysis.
 
 use crate::models::{BBox, TextSpan};
+use anyhow::Result;
 
 /// Default vertical-overlap threshold for merging spans into one line.
 pub const DEFAULT_LINE_MERGE_OVERLAP: f32 = 0.55;
+
+/// Pair-check budget for the greedy group scan: each span scans every
+/// existing line group, so 10K identical spans cost ~50M checks (~80s).
+/// Past the cap the merge hard-errors instead of hanging. Generous: real
+/// pages cost tens of thousands of checks at most.
+const MAX_MERGE_PAIR_CHECKS: usize = 2_000_000;
 
 /// Maximum horizontal gap (as a multiple of font size) for merging spans.
 /// Same-row spans across a column gutter must NOT merge, otherwise the
@@ -44,7 +51,10 @@ pub struct TextLine {
 }
 
 /// Merge spans into horizontal lines using `threshold` vertical overlap.
-pub fn merge_spans_to_lines_with_threshold(spans: &[TextSpan], threshold: f32) -> Vec<TextLine> {
+pub fn merge_spans_to_lines_with_threshold(
+    spans: &[TextSpan],
+    threshold: f32,
+) -> Result<Vec<TextLine>> {
     // Order spans top-to-bottom, then left-to-right for deterministic grouping.
     let mut order: Vec<usize> = (0..spans.len()).collect();
     order.sort_by(|&a, &b| {
@@ -69,11 +79,18 @@ pub fn merge_spans_to_lines_with_threshold(spans: &[TextSpan], threshold: f32) -
     // text is not concatenated).
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut group_boxes: Vec<BBox> = Vec::new();
+    let mut pair_checks: usize = 0;
     for idx in order {
         let span_box = spans[idx].bbox;
         let max_gap = MERGE_MAX_GAP_FONT_MULT * spans[idx].font_size.max(1.0);
         let mut best: Option<(usize, f32)> = None;
         for (gi, gbox) in group_boxes.iter().enumerate() {
+            pair_checks += 1;
+            if pair_checks > MAX_MERGE_PAIR_CHECKS {
+                anyhow::bail!(
+                    "line-merge budget exceeded: more than {MAX_MERGE_PAIR_CHECKS} span-group checks on one page"
+                );
+            }
             let ratio = span_box.vertical_overlap_ratio(gbox);
             if ratio > threshold
                 && span_box.h_gap(gbox) <= max_gap
@@ -129,11 +146,11 @@ pub fn merge_spans_to_lines_with_threshold(spans: &[TextSpan], threshold: f32) -
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     });
-    lines
+    Ok(lines)
 }
 
 /// Merge spans into horizontal lines with the default 0.55 overlap threshold.
-pub fn merge_spans_to_lines(spans: &[TextSpan]) -> Vec<TextLine> {
+pub fn merge_spans_to_lines(spans: &[TextSpan]) -> Result<Vec<TextLine>> {
     merge_spans_to_lines_with_threshold(spans, DEFAULT_LINE_MERGE_OVERLAP)
 }
 
@@ -321,7 +338,7 @@ mod tests {
             span("Hello", 72.0, 100.0, 110.0, 111.0, 11.0),
             span("world", 125.0, 100.0, 160.0, 111.0, 11.0),
         ];
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Hello world");
     }
@@ -332,7 +349,7 @@ mod tests {
             span("Top", 72.0, 100.0, 110.0, 111.0, 11.0),
             span("Bottom", 72.0, 120.0, 120.0, 131.0, 11.0),
         ];
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "Top");
         assert_eq!(lines[1].text, "Bottom");
@@ -345,7 +362,7 @@ mod tests {
             span("Hel", 72.0, 100.0, 90.0, 111.0, 11.0),
             span("lo", 90.0, 100.0, 102.0, 111.0, 11.0),
         ];
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Hello");
     }
@@ -358,7 +375,7 @@ mod tests {
             span("Row one text", 72.0, 250.0, 300.0, 260.0, 10.0),
             span("Row two text", 72.0, 300.0, 300.0, 310.0, 10.0),
         ];
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert_eq!(lines.len(), 3);
     }
 
@@ -369,7 +386,7 @@ mod tests {
             span("Sale", 72.0, 100.0, 100.0, 110.0, 10.0),
             span("50%", 105.0, 96.0, 150.0, 120.0, 24.0),
         ];
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert_eq!(lines.len(), 1);
     }
 
@@ -408,7 +425,7 @@ mod tests {
             span("Item0", 72.0, 100.0, 102.0, 111.0, 11.0),
             span("Item0", 73.2, 100.0, 103.2, 111.0, 11.0),
         ];
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "Item0");
     }
@@ -420,7 +437,7 @@ mod tests {
             span("Left", 72.0, 100.0, 110.0, 110.0, 10.0),
             span("Right", 330.0, 100.0, 370.0, 110.0, 10.0),
         ];
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert_eq!(lines.len(), 2);
     }
 
@@ -431,7 +448,7 @@ mod tests {
             bold_span("tion", 93.0, 100.0, 120.0, 111.0, 11.0),
             span("x", 123.0, 100.0, 130.0, 111.0, 11.0),
         ];
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert_eq!(lines.len(), 1);
         assert!(lines[0].is_bold);
     }
@@ -483,5 +500,16 @@ mod tests {
         };
         assert!(classify_heading(&line, 11.0));
         assert_eq!(heading_level(&line, 11.0), 3);
+    }
+
+    #[test]
+    fn identical_span_storm_hits_merge_budget() {
+        // HG-04: 10K identical spans made the greedy group scan O(n^2)
+        // (~80s debug). A pair-check budget fails fast with a named error.
+        let spans: Vec<TextSpan> = (0..10_000)
+            .map(|_| span("same", 72.0, 100.0, 110.0, 111.0, 11.0))
+            .collect();
+        let err = format!("{:?}", merge_spans_to_lines(&spans).unwrap_err());
+        assert!(err.contains("budget"), "must name the budget: {err}");
     }
 }

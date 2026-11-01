@@ -28,6 +28,7 @@ use rstar::{RTree, RTreeObject, AABB};
 use crate::config::ParserConfig;
 use crate::geometry::lines::{body_font_size, merge_spans_to_lines, TextLine};
 use crate::models::{BBox, RawPageElements, TextSpan, TriageReason, VectorSegment};
+use anyhow::Result;
 
 /// Overlap predicate for ρ_overlap involvement.
 pub const OVERLAP_PAIR_THRESHOLD: f32 = 0.25;
@@ -77,10 +78,9 @@ pub struct PageTriage {
 }
 
 /// Score a page and extract VLM fallback regions.
-#[must_use]
-pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> PageTriage {
-    let lines = merge_spans_to_lines(&page.spans);
-    score_page_with_lines(page, &lines, config)
+pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> Result<PageTriage> {
+    let lines = merge_spans_to_lines(&page.spans)?;
+    Ok(score_page_with_lines(page, &lines, config))
 }
 
 /// Score a page with pre-merged lines (saves a merge when the caller
@@ -713,7 +713,7 @@ mod tests {
                 ));
             }
         }
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert!(entropy_runs(&lines, 11.0).is_empty());
     }
 
@@ -732,7 +732,7 @@ mod tests {
                 ));
             }
         }
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         let runs = entropy_runs(&lines, 11.0);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].row_count, 5);
@@ -754,7 +754,7 @@ mod tests {
                 ));
             }
         }
-        let lines = merge_spans_to_lines(&spans);
+        let lines = merge_spans_to_lines(&spans).expect("merge");
         assert!(entropy_runs(&lines, 11.0).is_empty());
     }
 
@@ -794,7 +794,8 @@ mod tests {
         let anchor = || span("body text here", 72.0, 500.0, 300.0, 511.0);
         let mut near = cluster(100.0);
         near.extend(cluster(140.0)); // 10pt vertical gap
-        let verdict = score_page(&page(vec![anchor()], near), &ParserConfig::default());
+        let verdict =
+            score_page(&page(vec![anchor()], near), &ParserConfig::default()).expect("score");
         assert_eq!(verdict.fallback_regions.len(), 1);
         assert!(matches!(
             verdict.fallback_regions[0].reason,
@@ -802,7 +803,8 @@ mod tests {
         ));
         let mut far = cluster(100.0);
         far.extend(cluster(400.0));
-        let verdict = score_page(&page(vec![anchor()], far), &ParserConfig::default());
+        let verdict =
+            score_page(&page(vec![anchor()], far), &ParserConfig::default()).expect("score");
         assert_eq!(verdict.fallback_regions.len(), 2);
     }
 
