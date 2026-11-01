@@ -201,7 +201,31 @@ pub fn render_page_via_pdftoppm(pdf: &[u8], page_index: usize, dpi: u32) -> Opti
     let _cleanup = Cleanup {
         paths: vec![input.clone(), out_png.clone()],
     };
-    std::fs::write(&input, pdf).ok()?;
+    // O_EXCL on both paths: the pid.tag names are predictable inside the
+    // world-writable temp dir, so a planted symlink must fail closed
+    // instead of redirecting our bytes (CWE-59).
+    {
+        use std::io::Write as _;
+        if let Err(error) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&input)
+            .and_then(|mut f| f.write_all(pdf))
+        {
+            tracing::warn!(path = ?input, error = %error, "pdftoppm spill failed; synthetic canvas fallback");
+            return None;
+        }
+    }
+    // Reserve the output path before pdftoppm runs so it cannot be a
+    // planted symlink either (pdftoppm truncates and overwrites it).
+    if let Err(error) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&out_png)
+    {
+        tracing::warn!(path = ?out_png, error = %error, "pdftoppm output reservation failed; synthetic canvas fallback");
+        return None;
+    }
     let page_no = page_index.checked_add(1)?; // pdftoppm is 1-based
     let mut child = Command::new("pdftoppm")
         .args([
