@@ -206,20 +206,26 @@ pub fn render_page_via_pdftoppm(pdf: &[u8], page_index: usize, dpi: u32) -> Opti
     // instead of redirecting our bytes (CWE-59).
     {
         use std::io::Write as _;
-        std::fs::OpenOptions::new()
+        if let Err(error) = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&input)
             .and_then(|mut f| f.write_all(pdf))
-            .ok()?;
+        {
+            tracing::warn!(path = ?input, error = %error, "pdftoppm spill failed; synthetic canvas fallback");
+            return None;
+        }
     }
     // Reserve the output path before pdftoppm runs so it cannot be a
     // planted symlink either (pdftoppm truncates and overwrites it).
-    std::fs::OpenOptions::new()
+    if let Err(error) = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&out_png)
-        .ok()?;
+    {
+        tracing::warn!(path = ?out_png, error = %error, "pdftoppm output reservation failed; synthetic canvas fallback");
+        return None;
+    }
     let page_no = page_index.checked_add(1)?; // pdftoppm is 1-based
     let mut child = Command::new("pdftoppm")
         .args([

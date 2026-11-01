@@ -91,6 +91,13 @@ fn single_empty_text_show_yields_no_panic() {
     let pdf = pdf_with_ops(b"BT /F1 11 Tf 1 0 0 1 72 700 Tm () Tj ET\n");
     let pages = extract_document(&pdf, "emptystr.pdf").unwrap();
     assert_eq!(pages.len(), 1);
+    for span in &pages[0].spans {
+        let b = &span.bbox;
+        assert!(
+            b.x0.is_finite() && b.y0.is_finite() && b.x1.is_finite() && b.y1.is_finite(),
+            "non-finite bbox from empty show: {b:?}"
+        );
+    }
 }
 
 #[test]
@@ -98,6 +105,13 @@ fn zero_font_size_text_does_not_break_extraction() {
     let pdf = pdf_with_ops(b"BT /F1 0 Tf 1 0 0 1 72 700 Tm (invisible) Tj ET\n");
     let pages = extract_document(&pdf, "zerofont.pdf").unwrap();
     assert_eq!(pages.len(), 1);
+    for span in &pages[0].spans {
+        let b = &span.bbox;
+        assert!(
+            b.x0.is_finite() && b.y0.is_finite() && b.x1.is_finite() && b.y1.is_finite(),
+            "non-finite bbox from zero font size: {b:?}"
+        );
+    }
 }
 
 // --- Boundary: degenerate tables ------------------------------------------
@@ -228,6 +242,7 @@ fn inverted_and_zero_boxes_do_not_poison_geometry() {
 // --- Resource safety: temp file handling ------------------------------------
 
 #[test]
+#[cfg(unix)]
 fn pdftoppm_spill_refuses_to_follow_planted_symlinks() {
     use razorpdf_core::vlm::cropper::render_page_via_pdftoppm;
     use std::os::unix::fs::symlink;
