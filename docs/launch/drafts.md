@@ -38,7 +38,7 @@ Body:
 >
 > Ships as CLI + MCP server (`razorpdf mcp`) + Python bindings (GIL
 > released). Install: `pip install razorpdf` / `cargo install razorpdf`
-> (v0.1.2) or grab a binary from Releases. Demo GIF + notebook in the repo.
+> (v0.1.3) or grab a binary from Releases. Demo GIF + notebook in the repo.
 >
 > Honest limits: scanned/image-only pages still need a VLM or OCR pass
 > (pdftoppm rasterizer supported when installed); handwriting is out of
