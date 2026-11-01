@@ -280,6 +280,56 @@ fn cmap_lone_delimiters_terminate_with_bounded_tokens() {
 }
 
 #[test]
+fn cmap_huge_section_count_returns_promptly() {
+    use razorpdf_core::extractor::fonts::parse_tounicode_cmap;
+    use std::time::{Duration, Instant};
+
+    // HG-01: `for _ in 0..count` iterated an attacker-controlled count
+    // (up to 9.2e18) doing O(1) probes past the token end: ~30 bytes of
+    // CMap burned hours of CPU. Fixed by clamping count to remaining
+    // tokens (every arm advances i by >= 2, so count > rest/2 is pure burn).
+    let t = Instant::now();
+    let cmap = parse_tounicode_cmap(b"1000000000 beginbfchar\n<41> <0041>\nendbfchar");
+    assert!(t.elapsed() < Duration::from_secs(5), "section-count burn");
+    assert_eq!(cmap.direct.len(), 1, "non-vacuous: mapping must exist");
+}
+
+#[test]
+fn cmap_range_rule_width_is_capped() {
+    use razorpdf_core::extractor::fonts::{parse_tounicode_cmap, FontDecoding};
+
+    // HG-02: range-rule width came from the raw dst token length, and
+    // int_to_utf16 allocates `width` bytes PER DECODED CHAR: a 200KB dst
+    // turned 64 input bytes into 19.2MB of output. ToUnicode needs at
+    // most 4 bytes/char (surrogate pair), so width is capped at 4.
+    let big_hex = "AB".repeat(200_000);
+    let src = format!("1 beginbfrange\n<00> <FF> <{big_hex}>\nendbfrange");
+    let cmap = parse_tounicode_cmap(src.as_bytes());
+    let mut dec = FontDecoding::default();
+    dec.apply_tounicode(&cmap);
+    let out = dec.decode(&[0x41; 64]);
+    assert_eq!(cmap.range_rules.len(), 1, "non-vacuous: rule must parse");
+    assert!(
+        out.len() < 64 * 8,
+        "width amplification: 64B in, {}B out",
+        out.len()
+    );
+}
+
+#[test]
+fn cmap_bfrange_max_literal_does_not_panic() {
+    use razorpdf_core::extractor::fonts::parse_tounicode_cmap;
+
+    // HG-08: `hi.min(lo + 4095)` overflowed for lo near u32::MAX: debug
+    // builds panicked, release wrapped to an empty range and silently
+    // dropped the mapping. saturating_add unifies both profiles.
+    let cmap = parse_tounicode_cmap(b"1 beginbfrange\n<FFFFFFFF> <FFFFFFFF> (X)\nendbfrange");
+    assert_eq!(cmap.direct.get(&u32::MAX).map(String::as_str), Some("X"));
+    let cmap2 = parse_tounicode_cmap(b"1 beginbfrange\n<FFFFFF9B> <FFFFFFFF> (Y)\nendbfrange");
+    assert_eq!(cmap2.direct.len(), 101, "MAX-100..=MAX must map fully");
+}
+
+#[test]
 fn cmap_bfrange_array_overflow_does_not_panic() {
     use razorpdf_core::extractor::fonts::parse_tounicode_cmap;
 

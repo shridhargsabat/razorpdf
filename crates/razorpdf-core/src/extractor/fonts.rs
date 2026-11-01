@@ -622,6 +622,9 @@ pub fn parse_tounicode_cmap(data: &[u8]) -> ToUnicodeCMap {
             }
         };
         i += 2;
+        // Every arm below advances i by >= 2, so iterations past the
+        // remaining tokens are pure CPU burn on attacker-chosen counts.
+        let count = count.min(tokens.len().saturating_sub(i) / 2 + 1);
         for _ in 0..count {
             match op {
                 "begincodespacerange" => {
@@ -659,8 +662,11 @@ pub fn parse_tounicode_cmap(data: &[u8]) -> ToUnicodeCMap {
                     };
                     match tokens.get(i + 2) {
                         Some(CmapToken::Hex(dst)) => {
+                            // Width cap: ToUnicode needs at most 4 bytes/char
+                            // (surrogate pair); the raw token length would make
+                            // int_to_utf16 allocate megabytes PER DECODED CHAR.
                             cmap.range_rules
-                                .push((lo, hi, be_int(dst), dst.len().max(2)));
+                                .push((lo, hi, be_int(dst), dst.len().clamp(2, 4)));
                             i += 3;
                         }
                         Some(CmapToken::Word(open)) if open == "[" => {
@@ -698,7 +704,7 @@ pub fn parse_tounicode_cmap(data: &[u8]) -> ToUnicodeCMap {
                         }
                         Some(CmapToken::Literal(dst)) => {
                             let text = String::from_utf8_lossy(dst).into_owned();
-                            for code in lo..=hi.min(lo + 4095) {
+                            for code in lo..=hi.min(lo.saturating_add(4095)) {
                                 cmap.direct.insert(code, text.clone());
                             }
                             i += 3;
