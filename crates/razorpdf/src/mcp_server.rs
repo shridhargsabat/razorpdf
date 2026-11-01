@@ -294,7 +294,11 @@ async fn tool_extract_pdf_tables(args: &Value) -> Result<String, String> {
                 continue;
             }
             if use_mock {
-                let canvas = canvas.as_ref().expect("rendered above when needed");
+                // Defensive: canvas is Some whenever needs_canvas held, but a
+                // mock region must never panic the server if that drifts.
+                let Some(canvas) = canvas.as_ref() else {
+                    continue;
+                };
                 let uri = cropper::crop_region_to_data_uri(
                     canvas,
                     &region.bbox,
