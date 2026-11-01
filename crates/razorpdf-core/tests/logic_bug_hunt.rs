@@ -241,6 +241,42 @@ fn inverted_and_zero_boxes_do_not_poison_geometry() {
 
 // --- Resource safety: temp file handling ------------------------------------
 
+#[tokio::test]
+async fn off_page_region_degrades_to_raw_text() {
+    use razorpdf_core::assembler::assemble_document;
+    use razorpdf_core::vlm::MockVlmProvider;
+    use razorpdf_core::ParserConfig;
+
+    // HG-03: 4 off-page diagonals produced a VLM region whose crop was
+    // 0-wide; WebP encode failed and `?` aborted the whole document
+    // (exit 1, zero output). Per-region crop failure now degrades to
+    // raw text, exactly like a VLM completion failure.
+    let mut ops = String::from("1 w\n");
+    for k in 0..4 {
+        let x = 10000 + k * 5;
+        ops.push_str(&format!("{x} 10000 m {x2} 10030 l S\n", x2 = x + 40));
+    }
+    ops.push_str("BT /F1 12 Tf 1 0 0 1 72 700 Tm (anchor body text here) Tj ET\n");
+    let pdf = pdf_with_ops(ops.as_bytes());
+    let doc = assemble_document(
+        &pdf,
+        "offpage.pdf",
+        &ParserConfig::default(),
+        Arc::new(MockVlmProvider::new()),
+    )
+    .await
+    .expect("off-page region must not fail assembly");
+    assert_eq!(
+        doc.vlm_fallback_regions, 1,
+        "non-vacuous: the region path must engage"
+    );
+    assert!(
+        doc.markdown.contains("anchor body text"),
+        "clean content must survive: {:?}",
+        doc.markdown
+    );
+}
+
 #[test]
 #[cfg(unix)]
 fn pdftoppm_spill_refuses_to_follow_planted_symlinks() {

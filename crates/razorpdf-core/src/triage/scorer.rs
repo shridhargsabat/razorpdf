@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rstar::{RTree, RTreeObject, AABB};
 
 use crate::config::ParserConfig;
-use crate::geometry::lines::{body_font_size, merge_spans_to_lines, TextLine};
+use crate::geometry::lines::{body_font_size, merge_spans_to_lines_with_threshold, TextLine};
 use crate::models::{BBox, RawPageElements, TextSpan, TriageReason, VectorSegment};
 use anyhow::Result;
 
@@ -79,7 +79,7 @@ pub struct PageTriage {
 
 /// Score a page and extract VLM fallback regions.
 pub fn score_page(page: &RawPageElements, config: &ParserConfig) -> Result<PageTriage> {
-    let lines = merge_spans_to_lines(&page.spans)?;
+    let lines = merge_spans_to_lines_with_threshold(&page.spans, config.line_merge_overlap)?;
     Ok(score_page_with_lines(page, &lines, config))
 }
 
@@ -646,6 +646,7 @@ impl Dsu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::lines::merge_spans_to_lines;
 
     fn span(text: &str, x0: f32, y0: f32, x1: f32, y1: f32) -> TextSpan {
         TextSpan {

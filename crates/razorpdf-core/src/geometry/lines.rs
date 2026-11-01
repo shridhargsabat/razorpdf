@@ -512,4 +512,47 @@ mod tests {
         let err = format!("{:?}", merge_spans_to_lines(&spans).unwrap_err());
         assert!(err.contains("budget"), "must name the budget: {err}");
     }
+
+    #[test]
+    fn merge_threshold_config_is_live() {
+        // HG-09: `line_merge_overlap` was write-only (callers hardcoded
+        // the const). Two spans with 0.73 vertical overlap merge at the
+        // default 0.55 but stay split at 0.99.
+        let spans = vec![
+            span("alpha", 72.0, 100.0, 110.0, 111.0, 11.0),
+            span("beta", 72.0, 103.0, 110.0, 114.0, 11.0),
+        ];
+        let merged = merge_spans_to_lines_with_threshold(&spans, 0.55).expect("merge");
+        assert_eq!(merged.len(), 1, "0.73 overlap merges at 0.55");
+        let split = merge_spans_to_lines_with_threshold(&spans, 0.99).expect("merge");
+        assert_eq!(split.len(), 2, "0.73 overlap splits at 0.99");
+    }
+
+    #[test]
+    fn heading_mult_config_is_live() {
+        // HG-09: `heading_size_mult` was write-only. A 1.2x line is a
+        // heading at mult 1.15 but body text at 1.5 (non-bold isolates
+        // the size rule from the bold-short-line rule).
+        let line = TextLine {
+            spans: vec![],
+            bbox: BBox::new(72.0, 100.0, 200.0, 111.0),
+            text: "A moderately long section title here".to_string(),
+            font_size: 13.2,
+            is_bold: false,
+            is_monospace: false,
+        };
+        assert!(classify_heading_with_mult(&line, 11.0, 1.15));
+        assert!(!classify_heading_with_mult(&line, 11.0, 1.5));
+    }
+
+    #[test]
+    fn config_defaults_match_geometry_consts() {
+        // The threading above is behavior-neutral ONLY because defaults
+        // equal the consts. Pin the equivalence: changing a default is
+        // an intentional behavior change, not drift.
+        use crate::config::ParserConfig;
+        let config = ParserConfig::default();
+        assert_eq!(config.line_merge_overlap, DEFAULT_LINE_MERGE_OVERLAP);
+        assert_eq!(config.heading_size_mult, DEFAULT_HEADING_SIZE_MULT);
+    }
 }

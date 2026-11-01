@@ -6,7 +6,8 @@ pub mod table_grid;
 pub mod xy_cut;
 
 pub use lines::{
-    body_font_size, classify_heading, median_font_size, merge_spans_to_lines, TextLine,
+    body_font_size, classify_heading, classify_heading_with_mult, median_font_size,
+    merge_spans_to_lines, merge_spans_to_lines_with_threshold, TextLine,
 };
 pub use table_grid::{
     detect_all_tables, detect_borderless_tables, detect_ruled_tables, detect_vector_tables,

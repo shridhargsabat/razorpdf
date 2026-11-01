@@ -49,7 +49,8 @@ where
     let triaged_lines: Vec<(PageTriage, Vec<crate::geometry::lines::TextLine>)> = pages
         .par_iter()
         .map(|p| -> anyhow::Result<_> {
-            let lines = geometry::merge_spans_to_lines(&p.spans)?;
+            let lines =
+                geometry::merge_spans_to_lines_with_threshold(&p.spans, config.line_merge_overlap)?;
             let mut verdict = triage::score_page_with_lines(p, &lines, config);
             if !verdict.fallback_regions.is_empty() {
                 let tables = geometry::detect_all_tables(
@@ -84,7 +85,7 @@ where
     let vlm_fallback_regions: usize = triaged.iter().map(|t| t.fallback_regions.len()).sum();
 
     // 2. Render crops for regions (synchronous raster work).
-    let jobs = render_jobs(pdf, &pages, &triaged, config)?;
+    let jobs = render_jobs(pdf, &pages, &triaged, config);
     tracing::debug!(
         pages = total_pages,
         vlm_jobs = jobs.len(),
@@ -137,7 +138,7 @@ fn render_jobs(
     pages: &[RawPageElements],
     triaged: &[PageTriage],
     config: &ParserConfig,
-) -> Result<Vec<RegionJob>> {
+) -> Vec<RegionJob> {
     let mut jobs = Vec::new();
     for (page, tri) in pages.iter().zip(triaged.iter()) {
         if tri.fallback_regions.is_empty() {
@@ -146,13 +147,27 @@ fn render_jobs(
         let canvas =
             cropper::render_page_canvas(pdf, page, config.vlm.render_dpi, config.vlm.canvas_source);
         for (region_index, region) in tri.fallback_regions.iter().enumerate() {
-            let uri = cropper::crop_region_to_data_uri(
+            let uri = match cropper::crop_region_to_data_uri(
                 &canvas,
                 &region.bbox,
                 page.width,
                 page.height,
                 config.vlm.webp_quality,
-            )?;
+            ) {
+                Ok(uri) => uri,
+                Err(error) => {
+                    // One degenerate region (e.g. fully off-page vectors
+                    // cropping 0-wide) must not fail the document: degrade
+                    // to raw text, exactly like a VLM completion failure.
+                    tracing::warn!(
+                        page = page.page_index,
+                        region = region_index,
+                        error = %error,
+                        "region crop failed; keeping raw-text fallback"
+                    );
+                    continue;
+                }
+            };
             jobs.push(RegionJob {
                 page_index: page.page_index,
                 region_index,
@@ -165,7 +180,7 @@ fn render_jobs(
             });
         }
     }
-    Ok(jobs)
+    jobs
 }
 
 /// Complete jobs with at most `max_concurrency` in flight.
@@ -311,7 +326,11 @@ fn page_to_blocks(
                 if inside_region(cx, cy) || tables.iter().any(|t| t.bbox.contains_point(cx, cy)) {
                     continue;
                 }
-                let kind = if geometry::classify_heading(line, median_body) {
+                let kind = if geometry::classify_heading_with_mult(
+                    line,
+                    median_body,
+                    config.heading_size_mult,
+                ) {
                     BlockKind::Heading {
                         level: geometry::lines::heading_level(line, median_body),
                     }

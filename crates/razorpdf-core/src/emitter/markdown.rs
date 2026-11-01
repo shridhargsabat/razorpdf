@@ -24,7 +24,9 @@ pub fn blocks_to_markdown(blocks: &[LayoutBlock]) -> String {
             }
             BlockKind::CodeBlock => {
                 out.push_str("```\n");
-                out.push_str(&b.raw_text);
+                // Attacker-influenced span text can contain fence runs that
+                // would close the block early and inject markdown below.
+                out.push_str(&b.raw_text.replace("```", "'''"));
                 out.push_str("\n```\n\n");
             }
             BlockKind::ListItem { ordered, depth } => {
@@ -121,5 +123,18 @@ mod tests {
             "raw region text",
         );
         assert_eq!(blocks_to_markdown(&[pending]), "raw region text\n\n");
+    }
+
+    #[test]
+    fn code_fence_breakout_is_escaped() {
+        // HG-07: CodeBlock text containing ``` closed the fence early and
+        // everything after rendered as markdown. Fence runs are neutralized.
+        let md = blocks_to_markdown(&[block(
+            0,
+            BlockKind::CodeBlock,
+            "let x = 1;\n```\n# not a heading",
+        )]);
+        assert_eq!(md.matches("```").count(), 2, "only wrapper fences: {md:?}");
+        assert!(md.contains("'''"), "fence run neutralized: {md:?}");
     }
 }
