@@ -161,6 +161,10 @@ enum Axis {
 
 /// Find the center of the largest whitespace valley along `axis` whose
 /// extent meets `threshold` points. Returns the split coordinate.
+/// Valley-detection histogram cap: beyond 64K bins the occupancy vector
+/// is pure overhead (legit pages need hundreds at most).
+const MAX_VALLEY_BINS: usize = 65_536;
+
 fn find_valley(
     boxes: &[BBox],
     indices: &[usize],
@@ -174,6 +178,12 @@ fn find_valley(
         Axis::Y => region.height(),
     };
     if extent <= bin {
+        return None;
+    }
+    // Non-finite or absurd extents (inf/1e30 coords): the bin count below
+    // would saturate to usize::MAX and abort on allocation. Valley
+    // detection on such spans is meaningless; fall back to plain sorting.
+    if !extent.is_finite() || extent / bin > MAX_VALLEY_BINS as f32 {
         return None;
     }
     let n_bins = (extent / bin).ceil() as usize;
