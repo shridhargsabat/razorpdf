@@ -1,7 +1,7 @@
 //! PyO3 Python bindings: `parse_file` and `to_markdown`.
 //!
 //! Rust parsing runs on a shared tokio runtime with the GIL released
-//! (`allow_threads`), so concurrent Python threads parse in parallel.
+//! (`detach`), so concurrent Python threads parse in parallel.
 
 // `#[pyfunction]`-generated wrappers trip clippy::useless_conversion on
 // `PyResult`; the lint cannot see into the macro expansion, so allow
@@ -82,7 +82,7 @@ fn parse_file(
         }
     };
     let doc = py
-        .allow_threads(|| assemble_sync(&path, vlm_url.as_deref(), canvas))
+        .detach(|| assemble_sync(&path, vlm_url.as_deref(), canvas))
         .map_err(PyRuntimeError::new_err)?;
     Ok(pythonize::pythonize(py, &doc)?.unbind())
 }
@@ -92,7 +92,7 @@ fn parse_file(
 fn to_markdown(py: Python<'_>, path: &str) -> PyResult<String> {
     let path = path.to_string();
     let doc = py
-        .allow_threads(|| assemble_sync(&path, None, None))
+        .detach(|| assemble_sync(&path, None, None))
         .map_err(PyRuntimeError::new_err)?;
     Ok(doc.markdown)
 }
