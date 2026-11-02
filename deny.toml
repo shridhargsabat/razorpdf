@@ -1,0 +1,36 @@
+# cargo-deny configuration for razorpdf (workspace license: MIT OR Apache-2.0)
+# Checked in CI (`deny` job in .github/workflows/ci.yml).
+
+[advisories]
+# Default: pull RustSec advisory DB, fail on vulnerabilities/yanked.
+# Unmaintained warnings stay warnings (noisy in the Rust ecosystem).
+unmaintained = "warn"
+
+[licenses]
+# First-party crates are MIT OR Apache-2.0 (see workspace.package.license).
+# Dependencies must be permissive / weak-copyleft only — no GPL/AGPL/SSPL.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are near-unavoidable in Cargo trees — warn, don't fail.
+multiple-versions = "warn"
+# Our own manifests pin explicit versions; keep it that way.
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
