@@ -501,6 +501,8 @@ mod tests {
             image_bboxes: Vec::new(),
             filled_rects: Vec::new(),
             embedded_images: Vec::new(),
+            link_annotations: Vec::new(),
+            form_fields: Vec::new(),
         }
     }
 

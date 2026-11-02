@@ -18,6 +18,13 @@
 //!    mess signals (overlap clusters + entropy runs within a few line
 //!    heights) merge into one candidate region before scoring.
 //!
+//! 3. **Font-anomaly signals trip by per-span ratio with forced floors.**
+//!    Spans with `mojibake_ratio > 0.08` (corrupt CMap output) or
+//!    `math_glyph_ratio > 0.15` (math fonts/symbols) become signals that
+//!    force `S(R)` to at least `0.75` / `0.55` — span-level detection is
+//!    stricter than a region average, so no garbled span hides in a
+//!    clean average.
+//!
 //! Vector-diagram clusters trip structurally (a pure chart has no text to
 //! score) and scanned pages trip by the spec's explicit coverage rule.
 
@@ -26,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rstar::{RTree, RTreeObject, AABB};
 
 use crate::config::ParserConfig;
+use crate::extractor::fonts::analyze_span_anomaly;
 use crate::geometry::lines::{body_font_size, merge_spans_to_lines_with_threshold, TextLine};
 use crate::models::{BBox, RawPageElements, TextSpan, TriageReason, VectorSegment};
 use anyhow::Result;
@@ -48,6 +56,14 @@ pub const MIN_DIAGRAM_SEGMENTS: usize = 4;
 pub const SCANNED_MAX_CHARS: usize = 30;
 /// Scanned-page image coverage cutoff (fraction of page area).
 pub const SCANNED_MIN_COVERAGE: f32 = 0.5;
+/// Per-span mojibake ratio above which a span joins a corruption cluster.
+pub const MOJIBAKE_SPAN_THRESHOLD: f32 = 0.08;
+/// Per-span math ratio above which a span joins a math cluster.
+pub const MATH_SPAN_THRESHOLD: f32 = 0.15;
+/// Forced `S(R)` floor for corruption regions.
+pub const MOJIBAKE_SCORE_FLOOR: f32 = 0.75;
+/// Forced `S(R)` floor for math regions.
+pub const MATH_SCORE_FLOOR: f32 = 0.55;
 
 /// A sub-page region routed to VLM fallback.
 #[derive(Debug, Clone)]
@@ -126,6 +142,8 @@ pub fn score_page_with_lines(
             has_entropy: true,
             has_overlap: false,
             has_diagram: false,
+            has_mojibake: false,
+            has_math: false,
         });
     }
     for cluster in overlap_clusters(&page.spans, &involved) {
@@ -134,6 +152,8 @@ pub fn score_page_with_lines(
             has_entropy: false,
             has_overlap: true,
             has_diagram: false,
+            has_mojibake: false,
+            has_math: false,
         });
     }
     for bbox in diagrams {
@@ -142,7 +162,43 @@ pub fn score_page_with_lines(
             has_entropy: false,
             has_overlap: false,
             has_diagram: true,
+            has_mojibake: false,
+            has_math: false,
         });
+    }
+    for span in &page.spans {
+        let metrics = analyze_span_anomaly(&span.text, &span.font_name);
+        if metrics.mojibake_ratio > MOJIBAKE_SPAN_THRESHOLD {
+            signals.push(Signal {
+                bbox: span.bbox,
+                has_entropy: false,
+                has_overlap: false,
+                has_diagram: false,
+                has_mojibake: true,
+                has_math: false,
+            });
+        } else if metrics.math_glyph_ratio > MATH_SPAN_THRESHOLD {
+            signals.push(Signal {
+                bbox: span.bbox,
+                has_entropy: false,
+                has_overlap: false,
+                has_diagram: false,
+                has_mojibake: false,
+                has_math: true,
+            });
+        }
+    }
+    for line in lines {
+        if line_has_script_oscillation(line) {
+            signals.push(Signal {
+                bbox: line.bbox,
+                has_entropy: false,
+                has_overlap: false,
+                has_diagram: false,
+                has_mojibake: false,
+                has_math: true,
+            });
+        }
     }
     let merged = merge_signals(signals, med_font * SIGNAL_MERGE_FONT_MULT);
     let mut regions: Vec<FallbackRegion> = merged
@@ -161,12 +217,23 @@ pub fn score_page_with_lines(
             let rho_o = involvement_rate(&involved, Some(&in_region));
             let rho_t = f32::from(m.has_entropy);
             let rho_v = vector_noise_ratio(&page.vectors, &page.spans, Some(&m.bbox));
-            let score = complexity_score(rho_o, rho_t, rho_v);
-            // Diagrams trip structurally (a pure chart has no text to score).
-            if score < config.triage_threshold && !m.has_diagram {
+            let mut score = complexity_score(rho_o, rho_t, rho_v);
+            if m.has_mojibake {
+                score = score.max(MOJIBAKE_SCORE_FLOOR);
+            }
+            if m.has_math {
+                score = score.max(MATH_SCORE_FLOOR);
+            }
+            // Diagrams and font-anomaly signals trip structurally.
+            let structural = m.has_diagram || m.has_mojibake || m.has_math;
+            if score < config.triage_threshold && !structural {
                 return None;
             }
-            let reason = if m.has_entropy {
+            let reason = if m.has_mojibake {
+                TriageReason::CorruptedCMapOrMojibake
+            } else if m.has_math {
+                TriageReason::MathGlyphCluster
+            } else if m.has_entropy {
                 TriageReason::BorderlessIrregularTable
             } else if m.has_overlap {
                 TriageReason::OverlappingSpans
@@ -529,6 +596,30 @@ fn vector_noise_ratio(vectors: &[VectorSegment], spans: &[TextSpan], region: Opt
     (diagonals as f32 / texts as f32).min(1.0)
 }
 
+/// Sub/superscript oscillation: within one line, span baselines spread
+/// vertically while at least one span is markedly smaller — the TeX
+/// `$x^2$` signature that merged-line geometry alone cannot see.
+fn line_has_script_oscillation(line: &TextLine) -> bool {
+    if line.spans.len() < 2 {
+        return false;
+    }
+    let mut sizes: Vec<f32> = line.spans.iter().map(|s| s.font_size).collect();
+    sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = sizes[sizes.len() / 2];
+    if !line.spans.iter().any(|s| s.font_size < 0.85 * median) {
+        return false;
+    }
+    let mut min_c = f32::MAX;
+    let mut max_c = f32::MIN;
+    for span in &line.spans {
+        let center = (span.bbox.y0 + span.bbox.y1) * 0.5;
+        min_c = min_c.min(center);
+        max_c = max_c.max(center);
+    }
+    let line_h = (line.bbox.y1 - line.bbox.y0).max(1.0);
+    max_c - min_c > 0.2 * line_h
+}
+
 /// A mess signal awaiting proximity merge.
 #[derive(Debug, Clone)]
 struct Signal {
@@ -536,6 +627,8 @@ struct Signal {
     has_entropy: bool,
     has_overlap: bool,
     has_diagram: bool,
+    has_mojibake: bool,
+    has_math: bool,
 }
 
 /// Greedily merge signals with vertical gap below `merge_dist` and nonzero
@@ -581,6 +674,8 @@ fn merge_pass(signals: Vec<Signal>, merge_dist: f32) -> Vec<Signal> {
                 m.has_entropy |= sig.has_entropy;
                 m.has_overlap |= sig.has_overlap;
                 m.has_diagram |= sig.has_diagram;
+                m.has_mojibake |= sig.has_mojibake;
+                m.has_math |= sig.has_math;
                 placed = true;
                 break;
             }
@@ -670,6 +765,8 @@ mod tests {
             image_bboxes: Vec::new(),
             filled_rects: Vec::new(),
             embedded_images: Vec::new(),
+            link_annotations: Vec::new(),
+            form_fields: Vec::new(),
         }
     }
 
@@ -817,5 +914,125 @@ mod tests {
         assert!(is_scanned_page(&p));
         p.spans.push(span(&"x".repeat(40), 0.0, 20.0, 100.0, 30.0));
         assert!(!is_scanned_page(&p)); // too much text
+    }
+
+    fn span_with_font(text: &str, font: &str, x0: f32, y0: f32, x1: f32, y1: f32) -> TextSpan {
+        TextSpan {
+            text: text.to_string(),
+            bbox: BBox::new(x0, y0, x1, y1),
+            font_name: font.to_string(),
+            font_size: 11.0,
+            is_bold: false,
+            is_italic: false,
+            is_monospace: false,
+        }
+    }
+
+    #[test]
+    fn mojibake_region_forces_cmap_reason() {
+        // >8% replacement chars forces S(R) >= 0.75 as CorruptedCMapOrMojibake.
+        let spans = vec![
+            span("Hel��o w�rld, th�s is garbled", 72.0, 100.0, 300.0, 111.0),
+            span("ano�her broken l�ne here", 72.0, 116.0, 300.0, 127.0),
+        ];
+        let verdict = score_page(&page(spans, vec![]), &ParserConfig::default()).expect("score");
+        assert_eq!(verdict.fallback_regions.len(), 1);
+        let region = &verdict.fallback_regions[0];
+        assert!(matches!(
+            region.reason,
+            TriageReason::CorruptedCMapOrMojibake
+        ));
+        assert!(region.score >= 0.75, "score: {}", region.score);
+    }
+
+    #[test]
+    fn math_font_cluster_forces_math_reason() {
+        // Math symbol font (CMMI10) forces S(R) >= 0.55 as MathGlyphCluster.
+        let spans = vec![
+            span_with_font("x2+y2=z2", "CMMI10", 72.0, 100.0, 200.0, 111.0),
+            span_with_font("ab", "CMSY10", 72.0, 116.0, 150.0, 127.0),
+        ];
+        let verdict = score_page(&page(spans, vec![]), &ParserConfig::default()).expect("score");
+        assert_eq!(verdict.fallback_regions.len(), 1);
+        let region = &verdict.fallback_regions[0];
+        assert!(matches!(region.reason, TriageReason::MathGlyphCluster));
+        assert!(region.score >= 0.55, "score: {}", region.score);
+    }
+
+    #[test]
+    fn clean_text_triggers_no_anomaly_region() {
+        let spans = vec![
+            span(
+                "A clean sentence with normal text.",
+                72.0,
+                100.0,
+                300.0,
+                111.0,
+            ),
+            span(
+                "Another clean line follows here.",
+                72.0,
+                116.0,
+                300.0,
+                127.0,
+            ),
+        ];
+        let verdict = score_page(&page(spans, vec![]), &ParserConfig::default()).expect("score");
+        assert!(verdict.fallback_regions.is_empty());
+    }
+
+    #[test]
+    fn script_oscillation_detects_superscript() {
+        // "x²": full-size base + small raised digit.
+        let base = span("x", 72.0, 100.0, 80.0, 111.0);
+        let mut sup = span("2", 80.0, 93.0, 86.0, 102.0);
+        sup.font_size = 7.0;
+        let line = TextLine {
+            spans: vec![base, sup],
+            bbox: BBox::new(72.0, 93.0, 86.0, 111.0),
+            text: "x2".to_string(),
+            font_size: 11.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        assert!(line_has_script_oscillation(&line));
+        // Uniform baseline: no oscillation.
+        let flat = TextLine {
+            spans: vec![
+                span("ab", 72.0, 100.0, 100.0, 111.0),
+                span("cd", 100.0, 100.0, 128.0, 111.0),
+            ],
+            bbox: BBox::new(72.0, 100.0, 128.0, 111.0),
+            text: "abcd".to_string(),
+            font_size: 11.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        assert!(!line_has_script_oscillation(&flat));
+    }
+
+    #[test]
+    fn oscillating_line_routes_to_math_region() {
+        let base = span("x", 72.0, 100.0, 80.0, 111.0);
+        let mut sup = span("2", 80.0, 93.0, 86.0, 102.0);
+        sup.font_size = 7.0;
+        let line = TextLine {
+            spans: vec![base, sup],
+            bbox: BBox::new(72.0, 93.0, 86.0, 111.0),
+            text: "x2".to_string(),
+            font_size: 11.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        let verdict = score_page_with_lines(
+            &page(line.spans.clone(), vec![]),
+            std::slice::from_ref(&line),
+            &ParserConfig::default(),
+        );
+        assert_eq!(verdict.fallback_regions.len(), 1);
+        assert!(matches!(
+            verdict.fallback_regions[0].reason,
+            TriageReason::MathGlyphCluster
+        ));
     }
 }

@@ -329,7 +329,7 @@ async fn tool_extract_pdf_tables(args: &Value) -> Result<String, String> {
                         image_data_uri: uri,
                         page_index: page.page_index,
                         region: region.content_bbox,
-                        reason: region.reason.clone(),
+                        reason: region.reason,
                     })
                     .await
                     .map_err(|e| e.to_string())?;

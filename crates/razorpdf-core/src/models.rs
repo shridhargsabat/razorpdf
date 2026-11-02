@@ -48,6 +48,28 @@ pub struct RawPageElements {
     /// Placed raster images with decodable pixels (a subset of
     /// `image_bboxes`: unsupported encodings keep their bbox only).
     pub embedded_images: Vec<EmbeddedImage>,
+    /// Hyperlink annotations (`/Subtype /Link` with `/A → /URI`) in
+    /// top-left point space.
+    pub link_annotations: Vec<PdfLinkAnnotation>,
+    /// Interactive form field states (`/AcroForm /Fields`).
+    pub form_fields: Vec<FormFieldEntry>,
+}
+
+/// A hyperlink annotation: clickable region plus destination URI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdfLinkAnnotation {
+    pub bbox: BBox,
+    pub uri: String,
+}
+
+/// One interactive form field (`/Tx` text, `/Btn` button/checkbox,
+/// `/Ch` choice) with its current value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormFieldEntry {
+    pub name: String,
+    pub value: String,
+    pub field_type: String,
+    pub bbox: BBox,
 }
 
 /// Stream codec of an embedded image's bytes.
@@ -109,12 +131,14 @@ pub enum BlockKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TriageReason {
     OverlappingSpans,
     BorderlessIrregularTable,
     ScannedImageRegion,
     ComplexMathOrDiagram,
+    CorruptedCMapOrMojibake,
+    MathGlyphCluster,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -104,6 +104,14 @@ fn mock_markdown(req: &VlmRequest) -> String {
             "```mermaid\ngraph TD\n  A[mock diagram] --> B[mock point]\n```\n\n- mock data point\n"
                 .to_string()
         }
+        TriageReason::CorruptedCMapOrMojibake => {
+            format!(
+                "Mock re-transcription of garbled region on page {} \
+                ({:.0},{:.0})-({:.0},{:.0}).\n",
+                req.page_index, req.region.x0, req.region.y0, req.region.x1, req.region.y1
+            )
+        }
+        TriageReason::MathGlyphCluster => "$$x^2 + y^2 = z^2$$ (mock equation)\n".to_string(),
     }
 }
 

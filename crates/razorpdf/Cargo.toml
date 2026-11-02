@@ -14,7 +14,7 @@ name = "razorpdf"
 path = "src/main.rs"
 
 [dependencies]
-razorpdf-core = { version = "0.1.1", path = "../razorpdf-core" }
+razorpdf-core = { version = "0.2", path = "../razorpdf-core" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
