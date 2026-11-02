@@ -5,13 +5,9 @@
 # Defaults: fail on vulnerabilities/yanked via the RustSec advisory DB.
 # paste is unmaintained (not vulnerable) and arrives deep-transitively via
 # image -> exr -> pulp; nothing to upgrade to, so it is allowlisted here.
-# pyo3 0.22 advisories: the vulnerable APIs (PyString::from_object,
-# PyCFunction::new_closure) are not used anywhere in razorpdf-py, so these
-# are not exploitable through our code. Full upgrade to pyo3 0.29 is tracked
-# separately (breaking changes across 7 releases); see the upgrade issue.
 # ttf-parser is unmaintained crate-wide (not vulnerable); it arrives
 # transitively via lopdf, so there is no version to upgrade to.
-ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2025-0020", "RUSTSEC-2026-0177", "RUSTSEC-2026-0192"]
+ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2026-0192"]
 
 [licenses]
 # First-party crates are MIT OR Apache-2.0 (see workspace.package.license).
