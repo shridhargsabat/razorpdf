@@ -1,7 +1,10 @@
 //! Sub-page WebP cropper & async VLM router.
 
+pub mod cache;
 pub mod client;
 pub mod cropper;
+
+pub use cache::{compute_vlm_cache_key, Blake3VlmCache};
 
 pub use client::{
     strip_code_fences, HttpVlmProvider, MockVlmProvider, NoVlmProvider, VlmProvider, VlmRequest,

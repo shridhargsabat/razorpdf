@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
+use super::cache::{compute_vlm_cache_key, Blake3VlmCache};
 use crate::config::VlmConfig;
 use crate::models::{BBox, TriageReason};
 
@@ -31,7 +33,7 @@ pub struct VlmRequest {
 }
 
 /// Completion result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VlmResponse {
     /// Clean Markdown for the region (fences stripped).
     pub markdown: String,
@@ -209,6 +211,20 @@ impl HttpVlmProvider {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+
+    /// This provider's response cache (`None` when caching is disabled).
+    fn cache(&self) -> Option<Blake3VlmCache> {
+        self.config.enable_vlm_cache.then(|| {
+            Blake3VlmCache::new(Blake3VlmCache::resolve_dir(
+                self.config.cache_dir.as_deref(),
+            ))
+        })
+    }
+}
+
+/// User prompt for one region (also a cache-key input).
+fn region_prompt(reason: &TriageReason) -> String {
+    format!("Convert this document region to Markdown. Triage reason: {reason:?}.")
 }
 
 #[async_trait]
@@ -218,6 +234,17 @@ impl VlmProvider for HttpVlmProvider {
     }
 
     async fn complete_region(&self, req: &VlmRequest) -> Result<VlmResponse> {
+        let prompt = region_prompt(&req.reason);
+        let cache = self.cache();
+        let key = cache.as_ref().map(|_| {
+            compute_vlm_cache_key(req.image_data_uri.as_bytes(), &self.config.model, &prompt)
+        });
+        if let (Some(cache), Some(key)) = (&cache, &key) {
+            if let Some(hit) = cache.get(key) {
+                tracing::debug!(model = %self.config.model, "vlm cache hit");
+                return Ok(hit);
+            }
+        }
         let body = serde_json::json!({
             "model": self.config.model,
             "temperature": 0.0,
@@ -225,7 +252,7 @@ impl VlmProvider for HttpVlmProvider {
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": [
-                    {"type": "text", "text": format!("Convert this document region to Markdown. Triage reason: {:?}.", req.reason)},
+                    {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": req.image_data_uri}},
                 ]},
             ],
@@ -249,10 +276,16 @@ impl VlmProvider for HttpVlmProvider {
         let content = value["choices"][0]["message"]["content"]
             .as_str()
             .context("unexpected VLM response shape")?;
-        Ok(VlmResponse {
+        let response = VlmResponse {
             markdown: strip_code_fences(content),
             model: self.config.model.clone(),
-        })
+        };
+        if let (Some(cache), Some(key)) = (&cache, &key) {
+            if let Err(error) = cache.put(key, &response) {
+                tracing::warn!(error = %error, "vlm cache write failed");
+            }
+        }
+        Ok(response)
     }
 }
 
@@ -377,6 +410,8 @@ mod tests {
         let config = VlmConfig {
             url: Some(format!("http://{addr}/chat/completions")),
             model: "test-model".to_string(),
+            // Wire-format test: bypass the cache so reruns always hit HTTP.
+            enable_vlm_cache: false,
             ..VlmConfig::default()
         };
         let provider = HttpVlmProvider::new(config).expect("provider");
@@ -387,5 +422,115 @@ mod tests {
         assert_eq!(out.markdown, "# Hi");
         assert_eq!(out.model, "test-model");
         server.await.expect("server");
+    }
+
+    fn cache_test_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "razorpdf-client-cache-{tag}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    /// Pre-populated cache answers without touching the (unreachable) network.
+    #[tokio::test]
+    async fn cache_hit_skips_network() {
+        use crate::vlm::cache::{compute_vlm_cache_key, Blake3VlmCache};
+        let dir = cache_test_dir("hit");
+        let config = VlmConfig {
+            url: Some("http://127.0.0.1:9/unreachable".to_string()),
+            model: "test-model".to_string(),
+            cache_dir: Some(dir.clone()),
+            ..VlmConfig::default()
+        };
+        let request = req(TriageReason::OverlappingSpans);
+        let prompt = region_prompt(&request.reason);
+        let key = compute_vlm_cache_key(request.image_data_uri.as_bytes(), &config.model, &prompt);
+        Blake3VlmCache::new(&dir)
+            .put(
+                &key,
+                &VlmResponse {
+                    markdown: "# Cached".to_string(),
+                    model: "test-model".to_string(),
+                },
+            )
+            .expect("seed");
+        let provider = HttpVlmProvider::new(config).expect("provider");
+        let out = provider.complete_region(&request).await.expect("cached");
+        assert_eq!(out.markdown, "# Cached");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A miss completes over HTTP and persists the entry for next time.
+    #[tokio::test]
+    async fn cache_miss_populates_entry() {
+        use crate::vlm::cache::compute_vlm_cache_key;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = cache_test_dir("miss");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 65_536];
+            let n = sock.read(&mut buf).await.expect("read");
+            assert!(n > 0);
+            let body = r##"{"choices":[{"message":{"content":"# Fresh"}}]}"##;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(head.as_bytes()).await.expect("head");
+            sock.write_all(body.as_bytes()).await.expect("body");
+        });
+        let config = VlmConfig {
+            url: Some(format!("http://{addr}/chat/completions")),
+            model: "test-model".to_string(),
+            cache_dir: Some(dir.clone()),
+            ..VlmConfig::default()
+        };
+        let provider = HttpVlmProvider::new(config.clone()).expect("provider");
+        let request = req(TriageReason::BorderlessIrregularTable);
+        let out = provider.complete_region(&request).await.expect("complete");
+        assert_eq!(out.markdown, "# Fresh");
+        server.await.expect("server");
+        // Entry persisted under <dir>/<first-2-hex>/<full-hex>.json.
+        let prompt = region_prompt(&request.reason);
+        let key = compute_vlm_cache_key(request.image_data_uri.as_bytes(), &config.model, &prompt);
+        assert!(dir.join(&key[..2]).join(format!("{key}.json")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Disabled cache ignores pre-seeded entries (network attempted).
+    #[tokio::test]
+    async fn disabled_cache_ignores_entry() {
+        use crate::vlm::cache::{compute_vlm_cache_key, Blake3VlmCache};
+        let dir = cache_test_dir("off");
+        let config = VlmConfig {
+            url: Some("http://127.0.0.1:9/unreachable".to_string()),
+            model: "test-model".to_string(),
+            cache_dir: Some(dir.clone()),
+            enable_vlm_cache: false,
+            timeout_secs: 5,
+            ..VlmConfig::default()
+        };
+        let request = req(TriageReason::OverlappingSpans);
+        let prompt = region_prompt(&request.reason);
+        let key = compute_vlm_cache_key(request.image_data_uri.as_bytes(), &config.model, &prompt);
+        Blake3VlmCache::new(&dir)
+            .put(
+                &key,
+                &VlmResponse {
+                    markdown: "# Cached".to_string(),
+                    model: "test-model".to_string(),
+                },
+            )
+            .expect("seed");
+        let provider = HttpVlmProvider::new(config).expect("provider");
+        assert!(provider.complete_region(&request).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

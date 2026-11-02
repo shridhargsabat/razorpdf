@@ -70,6 +70,12 @@ pub struct VlmConfig {
     /// Page-canvas source for VLM crops (synthetic default; `auto` uses
     /// `pdftoppm` when present on PATH).
     pub canvas_source: CanvasSource,
+    /// Cache VLM completions on disk (content-addressed by model + prompt
+    /// + image bytes).
+    pub enable_vlm_cache: bool,
+    /// Cache directory override (default: `RAZORPDF_CACHE_DIR` env var or
+    /// `~/.cache/razorpdf/vlm`).
+    pub cache_dir: Option<std::path::PathBuf>,
 }
 
 /// `OPENAI_BASE_URL` holds a base (…/v1); expand to the chat route.
@@ -95,6 +101,8 @@ impl Default for VlmConfig {
             timeout_secs: 180,
             max_tokens: 2000,
             canvas_source: CanvasSource::Synthetic,
+            enable_vlm_cache: true,
+            cache_dir: None,
         }
     }
 }
