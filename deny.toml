@@ -2,9 +2,7 @@
 # Checked in CI (`deny` job in .github/workflows/ci.yml).
 
 [advisories]
-# Default: pull RustSec advisory DB, fail on vulnerabilities/yanked.
-# Unmaintained warnings stay warnings (noisy in the Rust ecosystem).
-unmaintained = "warn"
+# Defaults: fail on vulnerabilities/yanked via the RustSec advisory DB.
 
 [licenses]
 # First-party crates are MIT OR Apache-2.0 (see workspace.package.license).
