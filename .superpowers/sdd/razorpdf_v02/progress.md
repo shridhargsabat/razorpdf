@@ -20,3 +20,10 @@ Ruling (phase 3): render_citation_overlay adapted — plan's canvas: &CanvasSour
 Ruling (scope): /goal prompt omits plan-matrix items --cite-bbox/--schema/--no-cache CLI flags, JSON-schema extraction, repeat_table_headers_in_chunks flag — excluded from this run; headers always repeat (correct behavior). Will flag as plan-vs-prompt delta at finish.
 Task Phase 3: complete (tests: cargo test --workspace --exclude razorpdf-py → 189 passed, 0 failed; fmt clean; clippy -D warnings clean; accurate-tokens chunks 8/8).
 Ruling (phase 4): optional ONNX/ort micro-tier skipped — present only in attached-plan prose, absent from the /goal prompt; would add a heavy native dep for speculative gain. Flagged as plan-vs-prompt delta at finish.
+Task Phase 4: complete (tests: cargo test --workspace --exclude razorpdf-py → 197 passed, 0 failed; fmt clean; clippy -D warnings clean).
+Ruling (phase 4): cache keys over (model, prompt text, image data-URI bytes) — URI deterministically wraps WebP bytes, so equivalent to plan's webp_bytes keying without a decode round-trip.
+Finding (phase 4): default-on cache + shared ~/.cache poisoned the pre-existing mock-server test on reruns (hit → no HTTP → server.await hung). Fixed by bypassing cache in that test; all cache tests use unique tempdirs.
+Ruling (phase 5): new MCP tools share a NoVLM cached parse keyed by (path, mtime); parse_pdf keeps its direct assembly (vlm options would poison a shared key; zero regression risk). True LRU via lru crate (cap 16) per plan.
+Ruling (phase 5): MCP pages are 1-based (human-facing convention), documented in schemas; chunks/page_scores echo 1-based page numbers alongside 0-based page_index where the core type carries it.
+Ruling (phase 5): substring boost only — no regex engine (would add the regex crate for a boost heuristic); BM25 + case-insensitive substring covers retrieval quality.
+Ruling (phase 5): get_pdf_toc recomputes per-page triage scores (extract+score, no VLM) since ParsedDocument doesn't retain them; nested heading tree built from chunk markdown.

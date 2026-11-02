@@ -12,5 +12,5 @@ pub use client::{
 };
 pub use cropper::{
     crop_region, crop_region_to_data_uri, crop_region_to_webp, encode_webp, region_to_pixels,
-    render_synthetic_canvas,
+    render_citation_overlay, render_synthetic_canvas,
 };
