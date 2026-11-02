@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege: all jobs only check out and build, so read-only contents.
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: test + clippy + fmt
