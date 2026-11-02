@@ -28,3 +28,5 @@ Ruling (phase 5): MCP pages are 1-based (human-facing convention), documented in
 Ruling (phase 5): substring boost only — no regex engine (would add the regex crate for a boost heuristic); BM25 + case-insensitive substring covers retrieval quality.
 Ruling (phase 5): get_pdf_toc recomputes per-page triage scores (extract+score, no VLM) since ParsedDocument doesn't retain them; nested heading tree built from chunk markdown.
 Task Phase 5: complete (tests: cargo test --workspace --exclude razorpdf-py → 208 passed, 0 failed; fmt clean; clippy -D warnings clean).
+Task Phase 6: complete (tests: cargo test --workspace --exclude razorpdf-py → 212 passed, 0 failed; fmt clean; clippy -D warnings clean incl. razorpdf-py; wheel smoke-tested via maturin develop: 4 API fns + 4 error paths OK; bench_omnidoc --selftest OK + live GT-mode run OK).
+ALL 6 PHASES COMPLETE.
