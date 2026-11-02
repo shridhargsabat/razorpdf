@@ -66,6 +66,8 @@ fn empty_page() -> RawPageElements {
         image_bboxes: vec![],
         filled_rects: vec![],
         embedded_images: vec![],
+        link_annotations: vec![],
+        form_fields: vec![],
     }
 }
 

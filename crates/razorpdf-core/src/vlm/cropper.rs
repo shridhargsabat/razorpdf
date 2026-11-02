@@ -139,6 +139,121 @@ pub fn crop_region_to_data_uri(
     ))
 }
 
+/// Highlight fill: gold at 22% opacity over the cited region.
+const CITATION_FILL: ((u8, u8, u8), f32) = ((255, 215, 0), 0.22);
+/// Highlight border: near-opaque red, 2px ring.
+const CITATION_BORDER: ((u8, u8, u8), f32) = ((220, 38, 38), 0.95);
+const CITATION_BORDER_PX: u32 = 2;
+
+/// Blend one channel toward `src` by `alpha`.
+fn blend_channel(dst: u8, src: u8, alpha: f32) -> u8 {
+    (f32::from(dst) * (1.0 - alpha) + f32::from(src) * alpha).round() as u8
+}
+
+/// Alpha-blend a solid rect onto the image (clamped to bounds).
+fn blend_rect(
+    img: &mut RgbImage,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    color: (u8, u8, u8),
+    alpha: f32,
+) {
+    for y in y0..y1.min(img.height()) {
+        for x in x0..x1.min(img.width()) {
+            let dst = img.get_pixel(x, y);
+            img.put_pixel(
+                x,
+                y,
+                Rgb([
+                    blend_channel(dst[0], color.0, alpha),
+                    blend_channel(dst[1], color.1, alpha),
+                    blend_channel(dst[2], color.2, alpha),
+                ]),
+            );
+        }
+    }
+}
+
+/// Alpha-blended 2px border ring (empty ranges no-op on tiny regions).
+fn blend_border(
+    img: &mut RgbImage,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    color: (u8, u8, u8),
+    alpha: f32,
+) {
+    let bw = CITATION_BORDER_PX;
+    blend_rect(img, x0, y0, x1, y0.saturating_add(bw), color, alpha);
+    blend_rect(img, x0, y1.saturating_sub(bw), x1, y1, color, alpha);
+    blend_rect(
+        img,
+        x0,
+        y0.saturating_add(bw),
+        x0.saturating_add(bw),
+        y1.saturating_sub(bw),
+        color,
+        alpha,
+    );
+    blend_rect(
+        img,
+        x1.saturating_sub(bw),
+        y0.saturating_add(bw),
+        x1,
+        y1.saturating_sub(bw),
+        color,
+        alpha,
+    );
+}
+
+/// Render a padded citation preview as WebP bytes.
+///
+/// Crops a `padding_pt` context window around `bbox` (page-clamped),
+/// draws a gold highlight fill with a red 2px border over `bbox`, and
+/// encodes the crop as WebP.
+pub fn render_citation_overlay(
+    img: &RgbImage,
+    page_w: f32,
+    page_h: f32,
+    bbox: &BBox,
+    padding_pt: f32,
+    quality: u8,
+) -> Result<Vec<u8>> {
+    let padded = BBox::new(
+        (bbox.x0 - padding_pt).max(0.0),
+        (bbox.y0 - padding_pt).max(0.0),
+        (bbox.x1 + padding_pt).min(page_w),
+        (bbox.y1 + padding_pt).min(page_h),
+    );
+    let mut crop = crop_region(img, &padded, page_w, page_h);
+    let (pw, ph) = (
+        (padded.x1 - padded.x0).max(1.0),
+        (padded.y1 - padded.y0).max(1.0),
+    );
+    let rel = BBox::new(
+        bbox.x0 - padded.x0,
+        bbox.y0 - padded.y0,
+        bbox.x1 - padded.x0,
+        bbox.y1 - padded.y0,
+    );
+    let (x0, y0, w, h) = region_to_pixels(&rel, pw, ph, crop.width(), crop.height());
+    let (x1, y1) = (x0 + w, y0 + h);
+    blend_rect(&mut crop, x0, y0, x1, y1, CITATION_FILL.0, CITATION_FILL.1);
+    blend_border(
+        &mut crop,
+        x0,
+        y0,
+        x1,
+        y1,
+        CITATION_BORDER.0,
+        CITATION_BORDER.1,
+    );
+    encode_webp(&crop, quality)
+}
+
 /// Page-canvas source for VLM crops.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CanvasSource {
@@ -501,6 +616,8 @@ mod tests {
             image_bboxes: Vec::new(),
             filled_rects: Vec::new(),
             embedded_images: Vec::new(),
+            link_annotations: Vec::new(),
+            form_fields: Vec::new(),
         }
     }
 
@@ -663,5 +780,31 @@ mod tests {
         assert_eq!((img.width(), img.height()), (612, 792));
         let nonwhite = img.pixels().filter(|p| **p != Rgb([255, 255, 255])).count();
         assert!(nonwhite > 1000, "expected text pixels, got {nonwhite}");
+    }
+
+    #[test]
+    fn citation_overlay_highlights_bbox() {
+        // White 200x200 canvas standing in for a page; bbox center region.
+        let img = RgbImage::from_pixel(200, 200, Rgb([255, 255, 255]));
+        let bbox = BBox::new(50.0, 50.0, 150.0, 150.0);
+        let webp = render_citation_overlay(&img, 200.0, 200.0, &bbox, 10.0, 80).expect("overlay");
+        assert!(webp.starts_with(b"RIFF"));
+        let decoded: RgbImage = image::load_from_memory(&webp).expect("decode").to_rgb8();
+        // Padded crop (40,40)-(160,160) at 1pt = 1px.
+        assert_eq!((decoded.width(), decoded.height()), (120, 120));
+        // Center: gold fill blended over white. Corner: red border over fill.
+        assert_eq!(decoded.get_pixel(60, 60), &Rgb([255, 246, 199]));
+        assert_eq!(decoded.get_pixel(10, 10), &Rgb([222, 48, 46]));
+        // Outside the highlight: still white.
+        assert_eq!(decoded.get_pixel(2, 2), &Rgb([255, 255, 255]));
+    }
+
+    #[test]
+    fn citation_overlay_clamps_to_page() {
+        let img = RgbImage::from_pixel(200, 200, Rgb([255, 255, 255]));
+        let bbox = BBox::new(180.0, 180.0, 210.0, 210.0); // spills off-page
+        let webp = render_citation_overlay(&img, 200.0, 200.0, &bbox, 30.0, 80).expect("overlay");
+        let decoded: RgbImage = image::load_from_memory(&webp).expect("decode").to_rgb8();
+        assert_eq!((decoded.width(), decoded.height()), (50, 50));
     }
 }

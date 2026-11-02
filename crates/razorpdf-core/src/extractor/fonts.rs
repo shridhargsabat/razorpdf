@@ -889,6 +889,89 @@ fn tokenize_cmap(data: &[u8]) -> Vec<CmapToken> {
     tokens
 }
 
+// ---------------------------------------------------------------------------
+// Span anomaly metrics (mojibake + math detection for triage)
+// ---------------------------------------------------------------------------
+
+/// Per-span corruption/math signals consumed by triage scoring.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpanAnomalyMetrics {
+    /// Fraction of chars that are U+FFFD, PUA, or C0/C1 controls.
+    pub mojibake_ratio: f32,
+    /// Fraction of chars in math symbol blocks (`1.0` for math fonts).
+    pub math_glyph_ratio: f32,
+    /// Single-span analysis cannot observe baseline shifts; line-level
+    /// detection in triage sets this. Always false here.
+    pub has_sub_or_superscript_offset: bool,
+}
+
+/// TeX/Office math font families (matched case-insensitively after
+/// stripping the `XXXXXX+` subset prefix).
+const MATH_FONT_FAMILIES: &[&str] = &[
+    "cmmi",
+    "cmsy",
+    "cmex",
+    "msbm",
+    "cambriamath",
+    "latinmodernmath",
+    "symbol",
+];
+
+/// True for mathematical symbol fonts (`CMMI10`, `ABCDEF+CMSY10`, …).
+fn is_math_font(font_name: &str) -> bool {
+    let base = font_name.rsplit('+').next().unwrap_or(font_name);
+    let lower = base.to_lowercase();
+    MATH_FONT_FAMILIES.iter().any(|f| lower.contains(f))
+}
+
+/// True for corruption markers: U+FFFD, C0/C1 controls (except
+/// tab/LF/CR), and Private Use Area codepoints (all three planes).
+fn is_mojibake_char(ch: char) -> bool {
+    matches!(ch,
+        '\u{FFFD}'
+        | '\u{0}'..='\u{8}'
+        | '\u{B}' | '\u{C}'
+        | '\u{E}'..='\u{1F}'
+        | '\u{80}'..='\u{9F}'
+        | '\u{E000}'..='\u{F8FF}'
+        | '\u{F0000}'..='\u{FFFFD}'
+        | '\u{100000}'..='\u{10FFFD}')
+}
+
+/// True for Mathematical Operators, Supplemental Math Operators, and
+/// Mathematical Alphanumeric Symbols.
+fn is_math_symbol_char(ch: char) -> bool {
+    matches!(ch, '\u{2200}'..='\u{22FF}' | '\u{2A00}'..='\u{2AFF}' | '\u{1D400}'..='\u{1D7FF}')
+}
+
+/// Score one decoded span for CMap corruption and math content.
+///
+/// `mojibake_ratio` is the fraction of corruption-marker chars;
+/// `math_glyph_ratio` is the fraction of math-symbol chars, forced to
+/// `1.0` when the span's font is a math family.
+#[must_use]
+pub fn analyze_span_anomaly(text: &str, font_name: &str) -> SpanAnomalyMetrics {
+    let total = text.chars().count();
+    if total == 0 {
+        return SpanAnomalyMetrics {
+            mojibake_ratio: 0.0,
+            math_glyph_ratio: 0.0,
+            has_sub_or_superscript_offset: false,
+        };
+    }
+    let bad = text.chars().filter(|&ch| is_mojibake_char(ch)).count();
+    let math = if is_math_font(font_name) {
+        total
+    } else {
+        text.chars().filter(|&ch| is_math_symbol_char(ch)).count()
+    };
+    SpanAnomalyMetrics {
+        mojibake_ratio: bad as f32 / total as f32,
+        math_glyph_ratio: math as f32 / total as f32,
+        has_sub_or_superscript_offset: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,5 +1069,60 @@ mod tests {
         assert_eq!(map[0x41], Some("A".to_string()));
         assert_eq!(map[0xDE], Some("ﬁ".to_string()));
         assert_eq!(map[0xF0], None);
+    }
+
+    #[test]
+    fn mojibake_ratio_counts_fffd_pua_and_controls() {
+        let m = analyze_span_anomaly("ab\u{FFFD}\u{E001}\u{1}cd", "Helvetica");
+        assert!((m.mojibake_ratio - 3.0 / 7.0).abs() < 1e-6, "{m:?}");
+        assert_eq!(m.math_glyph_ratio, 0.0);
+        assert!(!m.has_sub_or_superscript_offset);
+    }
+
+    #[test]
+    fn whitespace_controls_are_not_mojibake() {
+        let m = analyze_span_anomaly("a\tb\nc\rd", "Helvetica");
+        assert_eq!(m.mojibake_ratio, 0.0);
+    }
+
+    #[test]
+    fn clean_text_has_zero_anomaly() {
+        let m = analyze_span_anomaly("Hello, world! 123 (test).", "Helvetica");
+        assert_eq!(m.mojibake_ratio, 0.0);
+        assert_eq!(m.math_glyph_ratio, 0.0);
+        assert!(!m.has_sub_or_superscript_offset);
+    }
+
+    #[test]
+    fn math_fonts_force_full_math_ratio() {
+        for font in [
+            "CMMI10",
+            "CMSY10",
+            "CMEX10",
+            "MSBM10",
+            "CambriaMath",
+            "LatinModernMath",
+            "Symbol",
+            "ABCDEF+CMMI10",
+        ] {
+            let m = analyze_span_anomaly("xyz", font);
+            assert_eq!(m.math_glyph_ratio, 1.0, "font: {font}");
+        }
+        let m = analyze_span_anomaly("xyz", "Helvetica-Bold");
+        assert_eq!(m.math_glyph_ratio, 0.0);
+    }
+
+    #[test]
+    fn math_symbol_chars_count_toward_ratio() {
+        // E, space, =, space, ∑, x, space, +, space, ∫, y → 2/11 math.
+        let m = analyze_span_anomaly("E = ∑x + ∫y", "Helvetica");
+        assert!((m.math_glyph_ratio - 2.0 / 11.0).abs() < 1e-6, "{m:?}");
+    }
+
+    #[test]
+    fn empty_text_has_zero_anomaly() {
+        let m = analyze_span_anomaly("", "Helvetica");
+        assert_eq!(m.mojibake_ratio, 0.0);
+        assert_eq!(m.math_glyph_ratio, 0.0);
     }
 }

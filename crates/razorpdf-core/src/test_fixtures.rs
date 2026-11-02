@@ -579,6 +579,124 @@ pub fn mixed_paper_pdf(pages: usize) -> Vec<u8> {
     )
 }
 
+/// Link annotation + AcroForm widgets: one `/Link` with `/URI` over the
+/// first line, one merged `/Tx` widget, one checked `/Btn` widget, and one
+/// widget-less catalog-level field. 2 spans, 0 vectors.
+pub fn annotated_form_pdf() -> Vec<u8> {
+    let mut content = String::new();
+    content.push_str(&text("F1", 11.0, 72.0, 100.0, "Visit our site"));
+    content.push_str(&text("F1", 11.0, 72.0, 130.0, "Form below"));
+    let bytes = build_pdf_multi(vec![content]);
+    let mut doc = Document::load_mem(&bytes).expect("reload fixture");
+    let page_id = *doc.get_pages().get(&1).expect("page 1");
+
+    // Link annotation over "Visit our site" (top-left y 100..111).
+    let mut link = lopdf::Dictionary::new();
+    link.set("Type", Object::Name(b"Annot".to_vec()));
+    link.set("Subtype", Object::Name(b"Link".to_vec()));
+    link.set("Rect", rect_array(72.0, 681.0, 170.0, 692.0));
+    let mut action = lopdf::Dictionary::new();
+    action.set("S", Object::Name(b"URI".to_vec()));
+    action.set("URI", Object::string_literal("https://example.com/docs"));
+    link.set("A", Object::Dictionary(action));
+    let link_id = doc.add_object(Object::Dictionary(link));
+
+    let tx_id = doc.add_object(Object::Dictionary(merged_widget(
+        "Tx",
+        "FullName",
+        Object::string_literal("Ada Lovelace"),
+        None,
+        (72.0, 620.0, 250.0, 638.0),
+    )));
+    let btn_id = doc.add_object(Object::Dictionary(merged_widget(
+        "Btn",
+        "Subscribe",
+        Object::Name(b"Yes".to_vec()),
+        Some("Yes"),
+        (72.0, 590.0, 84.0, 602.0),
+    )));
+
+    // Widget-less catalog field (value-only state, no visible bbox).
+    let mut orphan = lopdf::Dictionary::new();
+    orphan.set("FT", Object::Name(b"Tx".to_vec()));
+    orphan.set("T", Object::string_literal("HiddenNote"));
+    orphan.set("V", Object::string_literal("secret"));
+    let orphan_id = doc.add_object(Object::Dictionary(orphan));
+
+    if let Ok(Object::Dictionary(page)) = doc.get_object_mut(page_id) {
+        page.set(
+            "Annots",
+            Object::Array(vec![
+                Object::Reference(link_id),
+                Object::Reference(tx_id),
+                Object::Reference(btn_id),
+            ]),
+        );
+    }
+    let root = doc.trailer.get(b"Root").expect("catalog ref").clone();
+    if let Object::Reference(catalog_id) = root {
+        if let Ok(Object::Dictionary(catalog)) = doc.get_object_mut(catalog_id) {
+            let mut acro = lopdf::Dictionary::new();
+            acro.set(
+                "Fields",
+                Object::Array(vec![
+                    Object::Reference(tx_id),
+                    Object::Reference(btn_id),
+                    Object::Reference(orphan_id),
+                ]),
+            );
+            catalog.set("AcroForm", Object::Dictionary(acro));
+        }
+    }
+
+    let mut buf = Vec::new();
+    doc.save_to(&mut buf).expect("fixture pdf serialize");
+    buf
+}
+
+/// `[x0 y0 x1 y1]` rectangle array in PDF user space.
+fn rect_array(x0: f32, y0: f32, x1: f32, y1: f32) -> Object {
+    Object::Array(vec![
+        Object::Real(x0),
+        Object::Real(y0),
+        Object::Real(x1),
+        Object::Real(y1),
+    ])
+}
+
+/// Merged field/widget annotation dictionary (field + widget in one).
+fn merged_widget(
+    field_type: &str,
+    name: &str,
+    value: Object,
+    appearance_state: Option<&str>,
+    rect: (f32, f32, f32, f32),
+) -> lopdf::Dictionary {
+    let mut dict = lopdf::Dictionary::new();
+    dict.set("Type", Object::Name(b"Annot".to_vec()));
+    dict.set("Subtype", Object::Name(b"Widget".to_vec()));
+    dict.set("FT", Object::Name(field_type.as_bytes().to_vec()));
+    dict.set("T", Object::string_literal(name));
+    dict.set("V", value);
+    if let Some(state) = appearance_state {
+        dict.set("AS", Object::Name(state.as_bytes().to_vec()));
+    }
+    dict.set("Rect", rect_array(rect.0, rect.1, rect.2, rect.3));
+    dict
+}
+
+/// Two-page split paragraph: page 0 ends mid-word, page 1 continues.
+/// 4 spans, 0 vectors.
+pub fn split_paragraph_pdf() -> Vec<u8> {
+    let mut p0 = String::new();
+    p0.push_str(&text("F1", 11.0, 72.0, 100.0, "First page intro."));
+    p0.push_str(&text("F1", 11.0, 72.0, 130.0, "The exam-"));
+    let mut p1 = String::new();
+    p1.push_str(&text("F1", 11.0, 72.0, 100.0, "ple was hard."));
+    p1.push_str(&text("F1", 11.0, 72.0, 130.0, "Closing line."));
+    build_pdf_multi(vec![p0, p1])
+}
+
 /// All fixtures as `(name, bytes)` pairs.
 pub fn all_fixtures() -> Vec<(&'static str, Vec<u8>)> {
     vec![

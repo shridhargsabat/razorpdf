@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use super::fonts::{parse_tounicode_cmap, FontDecoding};
 use crate::models::{
-    BBox, EmbeddedImage, ImageCodec, PixelLayout, RawPageElements, TextSpan, VectorSegment,
+    BBox, EmbeddedImage, FormFieldEntry, ImageCodec, PdfLinkAnnotation, PixelLayout,
+    RawPageElements, TextSpan, VectorSegment,
 };
 
 /// Extract every page of a PDF into raw elements.
@@ -36,6 +37,9 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
     }
 
     let mut inputs = Vec::with_capacity(order.len());
+    // Field/widget object ids already harvested from page Annots, so the
+    // catalog AcroForm pass only picks up widget-less orphans.
+    let mut seen_annots: HashSet<ObjectId> = HashSet::new();
     for (page_index, (_, id)) in order.iter().enumerate() {
         let page_obj = doc.get_object(*id).context("page object")?;
         let page_dict = resolve_dict(&doc, page_obj).context("page dict")?;
@@ -43,6 +47,8 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
         let fonts = font_map(&doc, page_dict).unwrap_or_default();
         let content_bytes = page_content(&doc, page_dict).context("page contents")?;
         let (forms, images) = collect_xobjects(&doc, page_dict, &fonts)?;
+        let (links, fields, seen) = page_annotations(&doc, page_dict, ml, mt);
+        seen_annots.extend(seen);
         inputs.push(PageInput {
             page_index,
             origin_x: ml,
@@ -53,7 +59,16 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
             content_bytes,
             forms,
             images,
+            links,
+            form_fields: fields,
         });
+    }
+
+    // Catalog-level fields without page widgets land on page 0.
+    if let Some(first) = inputs.first_mut() {
+        first
+            .form_fields
+            .extend(orphan_acroform_fields(&doc, &seen_annots));
     }
 
     let mut out: Vec<RawPageElements> = inputs
@@ -79,6 +94,8 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
                 image_bboxes: state.image_bboxes,
                 filled_rects: state.filled_rects,
                 embedded_images: state.embedded_images,
+                link_annotations: input.links,
+                form_fields: input.form_fields,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -97,6 +114,8 @@ struct PageInput {
     content_bytes: Vec<u8>,
     forms: HashMap<String, Arc<FormXObject>>,
     images: HashMap<String, CollectedImage>,
+    links: Vec<PdfLinkAnnotation>,
+    form_fields: Vec<FormFieldEntry>,
 }
 
 /// Extract a single page (0-based `page_index`) from a PDF.
@@ -1335,6 +1354,288 @@ fn obj_name_string(obj: &Object) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Link annotations + AcroForm fields
+// ---------------------------------------------------------------------------
+
+/// Cap on annotations scanned per page (hostile PDFs pack thousands).
+const MAX_ANNOTS_PER_PAGE: usize = 10_000;
+/// Cap on AcroForm fields scanned per document.
+const MAX_ACROFORM_FIELDS: usize = 50_000;
+
+/// Decode a PDF text string: UTF-16BE with BOM, else lossy bytes.
+fn text_string(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let units: Vec<u16> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
+            .collect();
+        char::decode_utf16(units)
+            .map(|r| r.unwrap_or('\u{FFFD}'))
+            .collect()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// `/Rect` array → top-left-origin bbox (`None` when malformed).
+fn annot_bbox(rect: &Object, origin_x: f32, top_y: f32) -> Option<BBox> {
+    let Object::Array(items) = rect else {
+        return None;
+    };
+    if items.len() != 4 {
+        return None;
+    }
+    let nums: Vec<f32> = items.iter().map(obj_f32).collect::<Option<Vec<_>>>()?;
+    let (x0, y0, x1, y1) = (nums[0], nums[1], nums[2], nums[3]);
+    Some(BBox::new(
+        x0.min(x1) - origin_x,
+        top_y - y0.max(y1),
+        x0.max(x1) - origin_x,
+        top_y - y0.min(y1),
+    ))
+}
+
+/// Field value → display string (`/V` text, name, boolean, or number).
+fn field_value_string(doc: &Document, obj: &Object) -> String {
+    let obj = resolve(doc, obj).unwrap_or(obj);
+    match obj {
+        Object::String(bytes, _) => text_string(bytes),
+        Object::Name(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Object::Boolean(b) => b.to_string(),
+        Object::Integer(i) => i.to_string(),
+        Object::Real(f) => format!("{f}"),
+        _ => String::new(),
+    }
+}
+
+/// Inheritable field attributes gathered up the `/Parent` chain.
+struct FieldAttrs {
+    name: String,
+    field_type: String,
+    value: String,
+    seen: Vec<ObjectId>,
+}
+
+/// Gather `/FT`, dotted `/T` name, and `/V` from a widget/field dict,
+/// ascending `/Parent` (depth-capped). For buttons the appearance state
+/// (`/AS`) wins over `/V`, per the spec.
+fn field_attributes(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    start: Option<ObjectId>,
+) -> FieldAttrs {
+    let mut attrs = FieldAttrs {
+        name: String::new(),
+        field_type: String::new(),
+        value: String::new(),
+        seen: Vec::new(),
+    };
+    if let Some(id) = start {
+        attrs.seen.push(id);
+    }
+    let mut name_parts: Vec<String> = Vec::new();
+    let mut appearance = String::new();
+    let mut current: Option<&lopdf::Dictionary> = Some(dict);
+    for _ in 0..8 {
+        let Some(d) = current else { break };
+        if attrs.field_type.is_empty() {
+            attrs.field_type = d.get(b"FT").ok().map(obj_name_string).unwrap_or_default();
+        }
+        if let Ok(Object::String(bytes, _)) = d.get(b"T") {
+            name_parts.push(text_string(bytes));
+        }
+        if attrs.value.is_empty() {
+            if let Ok(v) = d.get(b"V") {
+                if !matches!(v, Object::Null) {
+                    attrs.value = field_value_string(doc, v);
+                }
+            }
+        }
+        if appearance.is_empty() {
+            appearance = d.get(b"AS").ok().map(obj_name_string).unwrap_or_default();
+        }
+        let parent = d.get(b"Parent").ok().and_then(|p| match p {
+            Object::Reference(id) => Some(*id),
+            _ => None,
+        });
+        match parent {
+            Some(id) => {
+                attrs.seen.push(id);
+                current = doc.get_object(id).ok().and_then(|o| match o {
+                    Object::Dictionary(d) => Some(d),
+                    _ => None,
+                });
+            }
+            None => break,
+        }
+    }
+    name_parts.reverse();
+    attrs.name = name_parts.join(".");
+    if attrs.field_type == "Btn" && !appearance.is_empty() {
+        attrs.value = appearance;
+    }
+    attrs
+}
+
+/// Parse one `/Link` annotation dict into a hyperlink (or `None` when it
+/// carries no usable `/URI`).
+fn parse_link_annotation(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    origin_x: f32,
+    top_y: f32,
+) -> Option<PdfLinkAnnotation> {
+    let bbox = annot_bbox(dict.get(b"Rect").ok()?, origin_x, top_y)?;
+    let action = dict.get(b"A").ok().and_then(|a| resolve(doc, a).ok())?;
+    let Object::Dictionary(action) = action else {
+        return None;
+    };
+    let uri = match action.get(b"URI").ok()? {
+        Object::String(bytes, _) => text_string(bytes),
+        _ => return None,
+    };
+    if uri.is_empty() {
+        return None;
+    }
+    Some(PdfLinkAnnotation { bbox, uri })
+}
+
+/// Collect one page's `/Annots`: hyperlinks plus form widgets (merged or
+/// parented). Returns links, fields, and harvested object ids for the
+/// catalog orphan pass.
+fn page_annotations(
+    doc: &Document,
+    page_dict: &lopdf::Dictionary,
+    origin_x: f32,
+    top_y: f32,
+) -> (
+    Vec<PdfLinkAnnotation>,
+    Vec<FormFieldEntry>,
+    HashSet<ObjectId>,
+) {
+    let mut links = Vec::new();
+    let mut fields = Vec::new();
+    let mut seen = HashSet::new();
+    let annots = page_dict.get(b"Annots").ok().and_then(|o| match o {
+        Object::Array(items) => Some(items),
+        _ => None,
+    });
+    let Some(annots) = annots else {
+        return (links, fields, seen);
+    };
+    for annot in annots.iter().take(MAX_ANNOTS_PER_PAGE) {
+        let id = match annot {
+            Object::Reference(id) => Some(*id),
+            _ => None,
+        };
+        let dict = resolve(doc, annot).ok().and_then(|o| match o {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        });
+        let Some(dict) = dict else { continue };
+        let subtype = dict
+            .get(b"Subtype")
+            .ok()
+            .map(obj_name_string)
+            .unwrap_or_default();
+        if subtype == "Link" {
+            if let Some(link) = parse_link_annotation(doc, dict, origin_x, top_y) {
+                links.push(link);
+            }
+            continue;
+        }
+        if subtype != "Widget" {
+            continue;
+        }
+        let attrs = field_attributes(doc, dict, id);
+        if attrs.field_type.is_empty() {
+            continue; // plain widget, not a form field
+        }
+        let bbox = dict
+            .get(b"Rect")
+            .ok()
+            .and_then(|r| annot_bbox(r, origin_x, top_y))
+            .unwrap_or_else(|| BBox::new(0.0, 0.0, 0.0, 0.0));
+        seen.extend(attrs.seen);
+        fields.push(FormFieldEntry {
+            name: attrs.name,
+            value: attrs.value,
+            field_type: attrs.field_type,
+            bbox,
+        });
+    }
+    (links, fields, seen)
+}
+
+/// Catalog `/AcroForm /Fields` without page widgets (value-only state).
+/// Skipped ids were already harvested from page Annots.
+fn orphan_acroform_fields(doc: &Document, seen: &HashSet<ObjectId>) -> Vec<FormFieldEntry> {
+    let mut out = Vec::new();
+    let catalog = doc
+        .trailer
+        .get(b"Root")
+        .ok()
+        .and_then(|r| resolve(doc, r).ok())
+        .and_then(|o| match o {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        });
+    let Some(catalog) = catalog else {
+        return out;
+    };
+    let acro = catalog
+        .get(b"AcroForm")
+        .ok()
+        .and_then(|a| resolve(doc, a).ok())
+        .and_then(|o| match o {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        });
+    let Some(acro) = acro else {
+        return out;
+    };
+    let fields = acro.get(b"Fields").ok().and_then(|f| match f {
+        Object::Array(items) => Some(items),
+        _ => None,
+    });
+    let Some(fields) = fields else {
+        return out;
+    };
+    for item in fields.iter().take(MAX_ACROFORM_FIELDS) {
+        let id = match item {
+            Object::Reference(id) => *id,
+            _ => continue,
+        };
+        if seen.contains(&id) {
+            continue;
+        }
+        let dict = doc.get_object(id).ok().and_then(|o| match o {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        });
+        let Some(dict) = dict else { continue };
+        // Widgets without a page Annots entry cannot be placed; value-only
+        // field dicts land on page 0 with a degenerate bbox.
+        if dict.get(b"Subtype").ok().map(obj_name_string).as_deref() == Some("Widget") {
+            continue;
+        }
+        let attrs = field_attributes(doc, dict, Some(id));
+        if attrs.name.is_empty() && attrs.value.is_empty() {
+            continue;
+        }
+        out.push(FormFieldEntry {
+            name: attrs.name,
+            value: attrs.value,
+            field_type: attrs.field_type,
+            bbox: BBox::new(0.0, 0.0, 0.0, 0.0),
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1583,5 +1884,41 @@ mod tests {
         assert_eq!(asciihex_decode(b"61 62>").unwrap(), b"ab");
         assert_eq!(asciihex_decode(b"6>").unwrap(), b"`"); // odd nibble pads low
         assert!(asciihex_decode(b"zz>").is_err());
+    }
+
+    #[test]
+    fn extracts_link_uri_annotations() {
+        let pdf = test_fixtures::annotated_form_pdf();
+        let p = extract_page(&pdf, 0).expect("extract");
+        assert_eq!(p.link_annotations.len(), 1);
+        let link = &p.link_annotations[0];
+        assert_eq!(link.uri, "https://example.com/docs");
+        assert!((link.bbox.x0 - 72.0).abs() < 0.01);
+        assert!((link.bbox.y0 - 100.0).abs() < 0.01);
+        assert!((link.bbox.x1 - 170.0).abs() < 0.01);
+        assert!((link.bbox.y1 - 111.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn extracts_acroform_field_values() {
+        let pdf = test_fixtures::annotated_form_pdf();
+        let p = extract_page(&pdf, 0).expect("extract");
+        assert_eq!(p.form_fields.len(), 3);
+        let tx = &p.form_fields[0];
+        assert_eq!(
+            (tx.name.as_str(), tx.field_type.as_str()),
+            ("FullName", "Tx")
+        );
+        assert_eq!(tx.value, "Ada Lovelace");
+        assert!((tx.bbox.y0 - 154.0).abs() < 0.01);
+        let btn = &p.form_fields[1];
+        assert_eq!(
+            (btn.name.as_str(), btn.field_type.as_str()),
+            ("Subscribe", "Btn")
+        );
+        assert_eq!(btn.value, "Yes");
+        let orphan = &p.form_fields[2];
+        assert_eq!(orphan.name, "HiddenNote");
+        assert_eq!(orphan.value, "secret");
     }
 }

@@ -17,7 +17,10 @@ use crate::config::ParserConfig;
 use crate::emitter;
 use crate::extractor;
 use crate::geometry;
-use crate::models::{BlockKind, LayoutBlock, ParsedDocument, RawPageElements};
+use crate::models::PdfLinkAnnotation;
+use crate::models::{
+    BlockKind, FormFieldEntry, LayoutBlock, PageBBox, ParsedDocument, RawPageElements,
+};
 use crate::triage::{self, PageTriage};
 use crate::vlm::{cropper, VlmProvider, VlmRequest};
 
@@ -95,24 +98,27 @@ where
     // 3. Bounded-concurrency VLM completion; failures degrade per-region.
     let resolved = complete_jobs(jobs, vlm, config.vlm.max_concurrency.max(1)).await;
 
-    // 4. Blocks per page, Markdown per page (parallel), chunks across doc.
-    let mut all_blocks: Vec<LayoutBlock> = Vec::new();
-    let mut markdown_pages: Vec<String> = Vec::new();
-    let page_outputs: Vec<(Vec<LayoutBlock>, String)> = pages
+    // 4. Blocks per page (parallel), cross-page stitching (sequential:
+    //    boundary-local), then Markdown per page + chunks across doc.
+    let mut page_blocks: Vec<Vec<LayoutBlock>> = pages
         .par_iter()
         .zip(triaged.par_iter())
         .zip(all_lines.par_iter())
-        .map(|((page, tri), lines)| {
-            let blocks = page_to_blocks(page, lines, tri, &resolved, config);
-            let markdown = emitter::blocks_to_markdown(&blocks);
-            (blocks, markdown)
-        })
+        .map(|((page, tri), lines)| page_to_blocks(page, lines, tri, &resolved, config))
         .collect();
-    for (blocks, markdown) in page_outputs {
-        markdown_pages.push(markdown);
-        all_blocks.extend(blocks);
+    let stitch_stats = geometry::stitch_across_pages(&mut page_blocks, config);
+    tracing::debug!(
+        tables_stitched = stitch_stats.tables_stitched,
+        paragraphs_merged = stitch_stats.paragraphs_merged,
+        "cross-page stitching"
+    );
+    let mut all_blocks: Vec<LayoutBlock> = Vec::new();
+    let mut markdown_pages: Vec<String> = Vec::new();
+    for blocks in &page_blocks {
+        markdown_pages.push(emitter::blocks_to_markdown(blocks));
+        all_blocks.extend(blocks.iter().cloned());
     }
-    let chunks = emitter::synthesize_chunks(&all_blocks);
+    let chunks = emitter::synthesize_chunks(&all_blocks, config.max_chunk_tokens);
 
     Ok(ParsedDocument {
         source_path: source_path.to_string(),
@@ -175,7 +181,7 @@ fn render_jobs(
                     image_data_uri: uri,
                     page_index: page.page_index,
                     region: region.content_bbox,
-                    reason: region.reason.clone(),
+                    reason: region.reason,
                 },
             });
         }
@@ -288,8 +294,12 @@ fn page_to_blocks(
                     id: format!("p{}-vlm{r}", page.page_index),
                     page_index: page.page_index,
                     bbox: region.content_bbox,
+                    page_spans: vec![PageBBox {
+                        page: page.page_index as u32,
+                        bbox: region.content_bbox,
+                    }],
                     kind: BlockKind::VlmFallbackRegion {
-                        reason: region.reason.clone(),
+                        reason: region.reason,
                         complexity_score: region.score,
                         resolved_markdown: resolved.get(&(page.page_index, r)).cloned(),
                     },
@@ -307,6 +317,10 @@ fn page_to_blocks(
                     id: format!("p{}-table{t}", page.page_index),
                     page_index: page.page_index,
                     bbox: table.bbox,
+                    page_spans: vec![PageBBox {
+                        page: page.page_index as u32,
+                        bbox: table.bbox,
+                    }],
                     kind: BlockKind::DeterministicTable {
                         rows: table.rows.clone(),
                         has_header: table.has_header,
@@ -343,14 +357,102 @@ fn page_to_blocks(
                     id: format!("p{}-line{i}", page.page_index),
                     page_index: page.page_index,
                     bbox: line.bbox,
+                    page_spans: vec![PageBBox {
+                        page: page.page_index as u32,
+                        bbox: line.bbox,
+                    }],
                     kind,
-                    raw_text: line.text.clone(),
+                    raw_text: linkify_line_text(line, &page.link_annotations),
                     reading_order: blocks.len(),
                 });
             }
         }
     }
+    // Form fields trail page content as checklist/bullet blocks (v1: no
+    // layout integration; fields keep document order, not reading order).
+    for (k, field) in page.form_fields.iter().enumerate() {
+        blocks.push(LayoutBlock {
+            id: format!("p{}-form{k}", page.page_index),
+            page_index: page.page_index,
+            bbox: field.bbox,
+            page_spans: vec![PageBBox {
+                page: page.page_index as u32,
+                bbox: field.bbox,
+            }],
+            kind: BlockKind::Paragraph,
+            raw_text: render_form_field(field),
+            reading_order: blocks.len(),
+        });
+    }
     blocks
+}
+
+/// Escape link display text for Markdown anchors.
+fn escape_link_text(text: &str) -> String {
+    text.replace('[', "\\[").replace(']', "\\]")
+}
+
+/// Escape a URI for a Markdown anchor target.
+fn escape_uri(uri: &str) -> String {
+    uri.replace(' ', "%20").replace(')', "%29")
+}
+
+/// Wrap span texts covered by link annotations in `[text](uri)`.
+///
+/// Spans whose centroid falls inside a link bbox become anchors; other
+/// spans pass through. Lines without any hit keep the merged line text
+/// (gap spacing preserved); linkified lines join spans with spaces.
+fn linkify_line_text(
+    line: &crate::geometry::lines::TextLine,
+    links: &[PdfLinkAnnotation],
+) -> String {
+    if links.is_empty() {
+        return line.text.clone();
+    }
+    let mut parts = Vec::with_capacity(line.spans.len());
+    let mut touched = false;
+    for span in &line.spans {
+        let (cx, cy) = span.bbox.centroid();
+        let hit = links.iter().find(|l| l.bbox.contains_point(cx, cy));
+        match hit {
+            Some(link) => {
+                touched = true;
+                parts.push(format!(
+                    "[{}]({})",
+                    escape_link_text(span.text.trim()),
+                    escape_uri(&link.uri)
+                ));
+            }
+            None => parts.push(span.text.clone()),
+        }
+    }
+    if touched {
+        parts.join(" ")
+    } else {
+        line.text.clone()
+    }
+}
+
+/// Render a form field as a Markdown checklist/bullet line:
+/// `- [x] Name` / `- [ ] Name` for buttons, `- Name: Value` otherwise.
+fn render_form_field(field: &FormFieldEntry) -> String {
+    if field.field_type == "Btn" {
+        let checked = !field.value.is_empty() && field.value != "Off";
+        let mark = if checked { "x" } else { " " };
+        if field.value.is_empty()
+            || field.value == "Yes"
+            || field.value == "Off"
+            || field.value == "On"
+        {
+            format!("- [{mark}] {}", field.name)
+        } else {
+            format!("- [{mark}] {}: {}", field.name, field.value)
+        }
+    } else if field.value.is_empty() {
+        format!("- {}", field.name)
+    } else {
+        format!("- {}: {}", field.name, field.value)
+    }
 }
 
 /// Raw-text fallback for a region: span texts in reading-ish order.
@@ -440,5 +542,87 @@ mod tests {
         assert!(!doc.markdown.contains("mock_col_a"));
         assert!(doc.markdown.contains("Item0")); // raw island text preserved
         assert!(doc.chunks.iter().all(|c| !c.parsed_by_vlm));
+    }
+
+    #[tokio::test]
+    async fn links_emit_as_markdown_anchors() {
+        let pdf = test_fixtures::annotated_form_pdf();
+        let doc = assemble_document(
+            &pdf,
+            "annotated.pdf",
+            &ParserConfig::default(),
+            Arc::new(NoVlmProvider),
+        )
+        .await
+        .expect("assemble");
+        assert!(
+            doc.markdown
+                .contains("[Visit our site](https://example.com/docs)"),
+            "markdown:\n{}",
+            doc.markdown
+        );
+    }
+
+    #[tokio::test]
+    async fn form_fields_emit_as_checklist() {
+        let pdf = test_fixtures::annotated_form_pdf();
+        let doc = assemble_document(
+            &pdf,
+            "annotated.pdf",
+            &ParserConfig::default(),
+            Arc::new(NoVlmProvider),
+        )
+        .await
+        .expect("assemble");
+        assert!(
+            doc.markdown.contains("- FullName: Ada Lovelace"),
+            "markdown:\n{}",
+            doc.markdown
+        );
+        assert!(
+            doc.markdown.contains("- [x] Subscribe"),
+            "markdown:\n{}",
+            doc.markdown
+        );
+        assert!(
+            doc.markdown.contains("- HiddenNote: secret"),
+            "markdown:\n{}",
+            doc.markdown
+        );
+    }
+
+    #[test]
+    fn unchecked_box_renders_empty() {
+        let field = crate::models::FormFieldEntry {
+            name: "Agree".to_string(),
+            value: "Off".to_string(),
+            field_type: "Btn".to_string(),
+            bbox: crate::models::BBox::new(0.0, 0.0, 10.0, 10.0),
+        };
+        assert_eq!(render_form_field(&field), "- [ ] Agree");
+    }
+
+    #[tokio::test]
+    async fn split_paragraph_stitches_across_pages() {
+        let pdf = test_fixtures::split_paragraph_pdf();
+        let doc = assemble_document(
+            &pdf,
+            "split.pdf",
+            &ParserConfig::default(),
+            Arc::new(NoVlmProvider),
+        )
+        .await
+        .expect("assemble");
+        assert_eq!(doc.total_pages, 2);
+        assert!(
+            doc.markdown.contains("The example was hard."),
+            "markdown:\n{}",
+            doc.markdown
+        );
+        assert!(
+            !doc.markdown.contains("exam-"),
+            "hyphen stump leaked:\n{}",
+            doc.markdown
+        );
     }
 }

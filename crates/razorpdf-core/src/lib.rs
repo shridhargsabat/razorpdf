@@ -9,6 +9,7 @@ pub mod emitter;
 pub mod extractor;
 pub mod geometry;
 pub mod models;
+pub mod search;
 pub mod test_fixtures;
 pub mod triage;
 pub mod vlm;
