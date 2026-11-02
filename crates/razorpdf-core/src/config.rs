@@ -23,6 +23,9 @@ pub struct ParserConfig {
     pub vlm_region_pad_pt: f32,
     /// Stitch tables/paragraphs split across page boundaries.
     pub enable_cross_page_stitching: bool,
+    /// Max tokens per RAG chunk; oversized tables split with repeated
+    /// headers (counted by `count_tokens`, exact under `accurate-tokens`).
+    pub max_chunk_tokens: usize,
     /// VLM client configuration.
     pub vlm: VlmConfig,
 }
@@ -38,6 +41,7 @@ impl Default for ParserConfig {
             triage_threshold: 0.45,
             vlm_region_pad_pt: 8.0,
             enable_cross_page_stitching: true,
+            max_chunk_tokens: 512,
             vlm: VlmConfig::default(),
         }
     }

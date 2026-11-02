@@ -171,6 +171,9 @@ pub struct GroundedChunk {
     pub markdown: String,
     pub token_estimate: usize,
     pub parsed_by_vlm: bool,
+    /// Page/bbox provenance (first entry is the chunk's own page; table
+    /// sub-chunks and stitched content append continuation pages).
+    pub page_spans: Vec<PageBBox>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

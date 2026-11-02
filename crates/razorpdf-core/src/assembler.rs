@@ -118,7 +118,7 @@ where
         markdown_pages.push(emitter::blocks_to_markdown(blocks));
         all_blocks.extend(blocks.iter().cloned());
     }
-    let chunks = emitter::synthesize_chunks(&all_blocks);
+    let chunks = emitter::synthesize_chunks(&all_blocks, config.max_chunk_tokens);
 
     Ok(ParsedDocument {
         source_path: source_path.to_string(),
