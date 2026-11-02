@@ -92,7 +92,8 @@ Pass any PDF via CLI, Python, or MCP and receive both structured Markdown and gr
       "breadcrumb": ["Attention Is All You Need", "3 Model Architecture"],
       "markdown": "| Self-Attention | O(n2 ·d) | O(1) | O(1) |\n| --- | ...",
       "token_estimate": 57,
-      "parsed_by_vlm": false
+      "parsed_by_vlm": false,
+      "page_spans": [{"page": 5, "bbox": {"x0": 124.5, "y0": 137.2, "x1": 468.0, "y1": 181.4}}]
     }
   ]
 }
@@ -132,7 +133,7 @@ PDF bytes
 
 * **Fast path is pure geometry:** Line merging, recursive XY-cut, and R-tree vector-table reconstruction run in parallel across cores with zero model calls.
 * **VLM fallback is sub-page:** Only the failing BBox is cropped to WebP and sent — a messy borderless table costs one small image crop, not a full-page render.
-* **Chunks are grounded:** Every chunk carries its `chunk_id`, `page_index`, `bbox` (`{x0, y0, x1, y1}` in PDF points), heading `breadcrumb` trail, `token_estimate`, and the `parsed_by_vlm` provenance flag.
+* **Chunks are grounded:** Every chunk carries its `chunk_id`, `page_index`, `bbox` (`{x0, y0, x1, y1}` in PDF points), heading `breadcrumb` trail, `token_estimate`, the `parsed_by_vlm` provenance flag, and multi-page `page_spans` for stitched content.
 * **Offline by default:** No network calls run in tests or on the fast path. Without `--vlm-url` or `--mock-vlm`, messy regions keep their raw geometric text so content is never dropped silently.
 
 ## Quickstart
@@ -183,13 +184,25 @@ doc = razorpdf.parse_file(
     "scan.pdf",
     vlm_url="http://localhost:11434/v1/chat/completions"
 )
+
+# Options: stitch_pages=True joins tables/paragraphs split across pages;
+# use_cache=True reuses blake3-keyed VLM responses across runs
+doc = razorpdf.parse_file("long.pdf", stitch_pages=True, use_cache=True)
+
+# BM25 + phrase retrieval over grounded chunks (offline, no VLM)
+hits = razorpdf.search_chunks("paper.pdf", "attention", top_k=5)
+print(hits[0]["chunk_id"], hits[0]["page"], hits[0]["score"])
+
+# Highlighted citation crop of any region as WebP bytes (page is 1-based)
+webp = razorpdf.render_citation("paper.pdf", 1, [72.0, 100.0, 540.0, 200.0])
+open("cite.webp", "wb").write(webp)
 ```
 
 From source: `cd crates/razorpdf-py && pip install maturin && maturin develop --release`.
 
 ### 3. MCP Server (Claude Code / OpenCode / Hermes)
 
-`razorpdf` includes a built-in Model Context Protocol (MCP) JSON-RPC 2.0 server over `stdio` exposing three tools: `parse_pdf`, `inspect_pdf_layout`, and `extract_pdf_tables`.
+`razorpdf` includes a built-in Model Context Protocol (MCP) JSON-RPC 2.0 server over `stdio` exposing seven tools: `parse_pdf`, `inspect_pdf_layout`, and `extract_pdf_tables`, plus progressive-disclosure tools `get_pdf_toc` (outline + per-page complexity scores), `search_pdf_chunks` (offline BM25 retrieval with bboxes), `read_pdf_page_range` (1-based page slices), and `render_pdf_region` (WebP image blocks with citation highlights). Parsed documents are cached in memory by path + mtime, so follow-up calls on the same PDF answer in milliseconds.
 
 **Claude Code:**
 
@@ -326,6 +339,8 @@ Docling matches razorpdf on the GST invoice (5/5 markers, 3 table rows) — at ~
 
 *Reproduce:* `.venv/bin/python scripts/bench_wild.py` (after `maturin develop --release`). The corpus is gitignored — fetch it first per `tests/wild/README.md`; the script degrades gracefully on a partial corpus.
 
+*OmniDocBench-style harness:* `scripts/bench_omnidoc.py [PDF_DIR]` measures pages/sec, peak RSS, and table/chunk/VLM counts per file and writes `reports/omnidoc_scorecard.md`. With `<stem>.json` ground-truth sidecars (`{"text": ..., "tables": [...]}`), it also reports reading-order NED and table TEDS (Zhang-Shasha tree-edit similarity). `scripts/bench_omnidoc.py --selftest` validates the TEDS implementation without any PDFs.
+
 ## Triage Math
 
 For each candidate region $R$, `crates/razorpdf-core/src/triage/scorer.rs` computes a visual complexity score $S(R)$:
@@ -336,6 +351,7 @@ $$S(R) = \min(1.0, 0.40 \cdot p_{\text{overlap}} + 0.35 \cdot p_{\text{tab\_entr
 * $p_{\text{tab\_entropy}}$: Set to `1.0` when $\ge 4$ consecutive $\ge 3$-island rows fail column bucketing (*jagged column counts or $x_0$ standard deviation above tolerance*).
 * $p_{\text{vector\_noise}}$: Density of diagonal vector segments intersecting text spans.
 * **Routing threshold:** Regions with $S(R) \ge 0.45$, scanned pages without text spans, and diagram clusters ($\ge 4$ vector segments) are padded, cropped to WebP, and sent to the configured VLM endpoint.
+* **Font-anomaly floors (v0.2.0):** regions additionally force $S(R) \ge 0.75$ when span mojibake (U+FFFD/PUA/control fallout from corrupt CMaps) exceeds 8%, and $S(R) \ge 0.55$ for math-font/symbol clusters and sub/superscript baseline oscillations — routed as `CorruptedCMapOrMojibake` / `MathGlyphCluster`.
 
 ## Project Structure
 
@@ -346,19 +362,22 @@ razorpdf/
 │   │   ├── benches/throughput.rs # Criterion pages/sec benchmark suite
 │   │   └── examples/dump_fixtures.rs
 │   ├── razorpdf/             # Binary: parse / inspect / bench / mcp
-│   └── razorpdf-py/              # PyO3 bindings: parse_file / to_markdown (+ GIL release)
+│   └── razorpdf-py/              # PyO3 bindings: parse_file / to_markdown / search_chunks / render_citation (+ GIL release)
 ├── scripts/
-│   └── bench_wild.py             # Real-world PDF benchmark vs pypdf, pdfminer.six, pymupdf
+│   ├── bench_wild.py             # Real-world PDF benchmark vs pypdf, pdfminer.six, pymupdf
+│   └── bench_omnidoc.py          # OmniDocBench-style harness: throughput, RSS, NED, table TEDS
 └── tests/wild/                   # Wild-PDF corpus (gitignored, refetchable — see README.md)
 ```
 
 ## Roadmap
 
 * **Completed (Phases 1–6):** Core geometric extraction, recursive XY-cut layout engine, R-tree vector table reconstruction, $S(R)$ triage scorer, sub-page WebP VLM client, MCP `stdio` server, and PyO3 bindings.
+* **Completed (v0.2.0):** Corrupt-CMap/math-glyph triage routing, hyperlink + AcroForm extraction, cross-page table/paragraph stitching, header-preserving token chunking with `page_spans` provenance, visual citation overlays, blake3 VLM response cache, 7-tool progressive-disclosure MCP server (TOC/BM25/page-range/region-render), expanded Python bindings, and the OmniDocBench-style benchmark harness.
 * **Planned:**
   * `pdfium` render backend (`--features pdfium`)
-  * Exact token counting via vendored `tiktoken` ranks
-  * Automatic region splitting for oversized blocks
+  * Exact token counting via vendored `tiktoken` ranks (currently opt-in download + heuristic fallback)
+  * Local ONNX micro-tier for offline formula/table recognition
+  * JSON-schema-guided extraction mode
 
 ## Contributing
 

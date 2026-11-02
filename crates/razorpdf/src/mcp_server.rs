@@ -8,7 +8,6 @@
 //! `isError` results per MCP convention; malformed traffic gets JSON-RPC
 //! protocol errors.
 
-use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -21,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use razorpdf_core::{
-    assembler, extractor, geometry, triage,
+    assembler, extractor, geometry, search, triage,
     vlm::{HttpVlmProvider, MockVlmProvider, NoVlmProvider},
     BBox, GroundedChunk, ParsedDocument, ParserConfig,
 };
@@ -289,60 +288,9 @@ async fn cached_document(path: &str) -> Result<Arc<ParsedDocument>, String> {
     Ok(doc)
 }
 
-/// Lowercase alphanumeric tokens.
-fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_lowercase())
-        .collect()
-}
-
 /// BM25-ranked chunk indices (highest first) with an exact-phrase boost.
 fn bm25_rank(chunks: &[GroundedChunk], query: &str, top_k: usize) -> Vec<(usize, f32)> {
-    const K1: f32 = 1.2;
-    const B: f32 = 0.75;
-    let docs: Vec<Vec<String>> = chunks.iter().map(|c| tokenize(&c.markdown)).collect();
-    let query_terms = tokenize(query);
-    if query_terms.is_empty() || docs.is_empty() {
-        return Vec::new();
-    }
-    let n = docs.len() as f32;
-    let avgdl = docs.iter().map(Vec::len).sum::<usize>() as f32 / n;
-    let mut df: HashMap<&str, usize> = HashMap::new();
-    for terms in &docs {
-        let mut seen = HashSet::new();
-        for term in terms {
-            if seen.insert(term.as_str()) {
-                *df.entry(term.as_str()).or_insert(0) += 1;
-            }
-        }
-    }
-    let qlower = query.to_lowercase();
-    let mut scored: Vec<(usize, f32)> = docs
-        .iter()
-        .enumerate()
-        .map(|(i, terms)| {
-            let mut score = 0.0;
-            for qt in &query_terms {
-                let tf = terms.iter().filter(|t| *t == qt).count() as f32;
-                if tf == 0.0 {
-                    continue;
-                }
-                let df_t = df.get(qt.as_str()).copied().unwrap_or(1).max(1) as f32;
-                let idf = (1.0 + (n - df_t + 0.5) / (df_t + 0.5)).ln();
-                score += idf * tf * (K1 + 1.0)
-                    / (tf + K1 * (1.0 - B + B * terms.len() as f32 / avgdl.max(1.0)));
-            }
-            if chunks[i].markdown.to_lowercase().contains(&qlower) {
-                score = score.mul_add(1.5, 1.0);
-            }
-            (i, score)
-        })
-        .filter(|(_, s)| *s > 0.0)
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(top_k.max(1));
-    scored
+    search::bm25_rank(chunks, query, top_k)
 }
 
 struct TocHeading {

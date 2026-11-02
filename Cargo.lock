@@ -2313,6 +2313,7 @@ dependencies = [
  "pyo3",
  "pythonize",
  "razorpdf-core",
+ "serde",
  "serde_json",
  "tokio",
 ]

@@ -27,3 +27,4 @@ Ruling (phase 5): new MCP tools share a NoVLM cached parse keyed by (path, mtime
 Ruling (phase 5): MCP pages are 1-based (human-facing convention), documented in schemas; chunks/page_scores echo 1-based page numbers alongside 0-based page_index where the core type carries it.
 Ruling (phase 5): substring boost only — no regex engine (would add the regex crate for a boost heuristic); BM25 + case-insensitive substring covers retrieval quality.
 Ruling (phase 5): get_pdf_toc recomputes per-page triage scores (extract+score, no VLM) since ParsedDocument doesn't retain them; nested heading tree built from chunk markdown.
+Task Phase 5: complete (tests: cargo test --workspace --exclude razorpdf-py → 208 passed, 0 failed; fmt clean; clippy -D warnings clean).

@@ -285,3 +285,16 @@ Where:
   1. Create `benches/throughput.rs` measuring pages/second on 100-page synthetic multi-column documents.
   2. Generate a clean `README.md` featuring architecture ASCII diagrams, benchmark comparison tables, CLI usage examples, MCP configuration snippet for Claude Code / OpenCode / Hermes, and Python snippet.
 * **Verification Gate 6:** Full `cargo test --workspace` and `cargo clippy --workspace -- -D warnings` pass cleanly.
+
+## 6. v0.2.0 Implementation Record (Agent Hermes)
+
+Executed from `razorpdf_v02_implementation_plan.md` on branch `feat/v0.2.0`, one commit per phase, each gated on `cargo fmt --check`, `cargo clippy -- -D warnings`, and the workspace test suite (175 → 208+ tests).
+
+* **Phase 1 (triage + annotations):** `TriageReason::{CorruptedCMapOrMojibake, MathGlyphCluster}`, `analyze_span_anomaly()` (mojibake/math ratios), forced $S(R)$ floors via triage signal flags, `/Link` `/URI` + `/AcroForm` extraction with Markdown anchors and `- [x]` checklist emission.
+* **Phase 2 (cross-page):** `geometry/cross_page.rs` stitching (column-count + 0.85 X-IoU table merge with header dedup and continuation fold-up; paragraph merge with de-hyphenation), `PageBBox` + inclusive `LayoutBlock.page_spans` provenance.
+* **Phase 3 (chunking + citations):** `max_chunk_tokens` table splitting with repeated headers and `t{n}` sub-chunk ids, `GroundedChunk.page_spans`, OnceLock-cached BPE, `render_citation_overlay()` (gold fill + red ring WebP crops).
+* **Phase 4 (VLM cache):** `blake3`-keyed disk cache (`~/.cache/razorpdf/vlm`, atomic writes) integrated into `HttpVlmProvider` with hit/miss/disable coverage.
+* **Phase 5 (MCP):** mtime-keyed LRU document cache plus `get_pdf_toc`, `search_pdf_chunks` (core `search::bm25_rank`), `read_pdf_page_range`, `render_pdf_region` (native image blocks); 11 JSON-RPC round-trip tests.
+* **Phase 6 (Python + bench):** `search_chunks` / `render_citation` bindings with `stitch_pages` / `use_cache` options (verified against a real wheel), `scripts/bench_omnidoc.py` (throughput/RSS/NED/Zhang-Shasha TEDS + scorecard), README + roadmap updates.
+
+**Deliberate deltas vs the plan:** triage integrated through the existing signal pipeline (no `compute_region_triage_score` exists); pdfium work landed in `lopdf_fallback` (backend is a delegating stub); column IoU and sub-chunk boxes use even splits (no per-column/row geometry at block level); untestable "consonant cluster" signal dropped; regex boost implemented as substring boost (no new dep); ONNX micro-tier, JSON-schema mode, and `--cite-bbox`/`--schema`/`--no-cache` CLI flags deferred (absent from the execution prompt).
