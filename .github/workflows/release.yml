@@ -71,11 +71,14 @@ jobs:
           ARCHIVE: ${{ matrix.archive }}
         run: |
           cd "target/${TARGET}/release"
+          # Dispatch runs use the branch name as TAG: sanitize slashes so
+          # branch dispatches can package (no-op for real v* tags).
+          SAFE_TAG="${TAG//\//-}"
           if [ "$ARCHIVE" = "zip" ]; then
-            7z a "razorpdf-${TAG}-${TARGET}.zip" razorpdf.exe
+            7z a "razorpdf-${SAFE_TAG}-${TARGET}.zip" razorpdf.exe
             mv ./*.zip "$GITHUB_WORKSPACE/"
           else
-            tar czf "razorpdf-${TAG}-${TARGET}.tar.gz" razorpdf
+            tar czf "razorpdf-${SAFE_TAG}-${TARGET}.tar.gz" razorpdf
             mv ./*.tar.gz "$GITHUB_WORKSPACE/"
           fi
       - uses: actions/upload-artifact@v4
