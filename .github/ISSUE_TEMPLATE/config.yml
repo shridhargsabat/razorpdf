@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/shridhargsabat/razorpdf/tree/main/docs
+    about: Usage docs, integrations, and VLM provider setup.
+  - name: Security vulnerability (private)
+    url: https://github.com/shridhargsabat/razorpdf/security/advisories/new
+    about: Please report vulnerabilities privately, never as a public issue. See SECURITY.md.

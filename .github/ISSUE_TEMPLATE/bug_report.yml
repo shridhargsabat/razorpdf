@@ -1,0 +1,81 @@
+name: Bug report
+description: Something parsed wrong, crashed, or behaved unexpectedly
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: razorpdf version
+      description: Output of `razorpdf --version` or `pip show razorpdf`
+      placeholder: "0.1.6"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - pip (prebuilt wheel)
+        - cargo install
+        - release binary
+        - Docker / GHCR image
+        - built from source
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and Python/Rust versions
+      placeholder: "Fedora 44, Python 3.12"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part is affected?
+      options:
+        - CLI (parse/inspect/bench)
+        - Python API
+        - MCP server
+        - Geometry / layout
+        - Tables
+        - VLM fallback
+        - RAG chunks / grounding
+        - Packaging / Docker / CI
+        - Docs / demo
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact command or minimal code snippet
+      placeholder: |
+        razorpdf parse samples/invoice.pdf -o out.md --json out.json
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual output
+      description: What should the Markdown/chunks look like, and what did you get instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: share-pdf
+    attributes:
+      label: Can you share the problem PDF?
+      description: Layout bugs are much faster to fix with the real file. Redact sensitive content if needed.
+      options:
+        - "Yes, attached to this issue"
+        - "Yes, on request (sensitive content)"
+        - "No, but I can describe the layout"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste stderr / traceback. Wrap in triple backticks.
+      render: shell
