@@ -18,7 +18,9 @@ use crate::emitter;
 use crate::extractor;
 use crate::geometry;
 use crate::models::PdfLinkAnnotation;
-use crate::models::{BlockKind, FormFieldEntry, LayoutBlock, ParsedDocument, RawPageElements};
+use crate::models::{
+    BlockKind, FormFieldEntry, LayoutBlock, PageBBox, ParsedDocument, RawPageElements,
+};
 use crate::triage::{self, PageTriage};
 use crate::vlm::{cropper, VlmProvider, VlmRequest};
 
@@ -96,22 +98,25 @@ where
     // 3. Bounded-concurrency VLM completion; failures degrade per-region.
     let resolved = complete_jobs(jobs, vlm, config.vlm.max_concurrency.max(1)).await;
 
-    // 4. Blocks per page, Markdown per page (parallel), chunks across doc.
-    let mut all_blocks: Vec<LayoutBlock> = Vec::new();
-    let mut markdown_pages: Vec<String> = Vec::new();
-    let page_outputs: Vec<(Vec<LayoutBlock>, String)> = pages
+    // 4. Blocks per page (parallel), cross-page stitching (sequential:
+    //    boundary-local), then Markdown per page + chunks across doc.
+    let mut page_blocks: Vec<Vec<LayoutBlock>> = pages
         .par_iter()
         .zip(triaged.par_iter())
         .zip(all_lines.par_iter())
-        .map(|((page, tri), lines)| {
-            let blocks = page_to_blocks(page, lines, tri, &resolved, config);
-            let markdown = emitter::blocks_to_markdown(&blocks);
-            (blocks, markdown)
-        })
+        .map(|((page, tri), lines)| page_to_blocks(page, lines, tri, &resolved, config))
         .collect();
-    for (blocks, markdown) in page_outputs {
-        markdown_pages.push(markdown);
-        all_blocks.extend(blocks);
+    let stitch_stats = geometry::stitch_across_pages(&mut page_blocks, config);
+    tracing::debug!(
+        tables_stitched = stitch_stats.tables_stitched,
+        paragraphs_merged = stitch_stats.paragraphs_merged,
+        "cross-page stitching"
+    );
+    let mut all_blocks: Vec<LayoutBlock> = Vec::new();
+    let mut markdown_pages: Vec<String> = Vec::new();
+    for blocks in &page_blocks {
+        markdown_pages.push(emitter::blocks_to_markdown(blocks));
+        all_blocks.extend(blocks.iter().cloned());
     }
     let chunks = emitter::synthesize_chunks(&all_blocks);
 
@@ -289,6 +294,10 @@ fn page_to_blocks(
                     id: format!("p{}-vlm{r}", page.page_index),
                     page_index: page.page_index,
                     bbox: region.content_bbox,
+                    page_spans: vec![PageBBox {
+                        page: page.page_index as u32,
+                        bbox: region.content_bbox,
+                    }],
                     kind: BlockKind::VlmFallbackRegion {
                         reason: region.reason,
                         complexity_score: region.score,
@@ -308,6 +317,10 @@ fn page_to_blocks(
                     id: format!("p{}-table{t}", page.page_index),
                     page_index: page.page_index,
                     bbox: table.bbox,
+                    page_spans: vec![PageBBox {
+                        page: page.page_index as u32,
+                        bbox: table.bbox,
+                    }],
                     kind: BlockKind::DeterministicTable {
                         rows: table.rows.clone(),
                         has_header: table.has_header,
@@ -344,6 +357,10 @@ fn page_to_blocks(
                     id: format!("p{}-line{i}", page.page_index),
                     page_index: page.page_index,
                     bbox: line.bbox,
+                    page_spans: vec![PageBBox {
+                        page: page.page_index as u32,
+                        bbox: line.bbox,
+                    }],
                     kind,
                     raw_text: linkify_line_text(line, &page.link_annotations),
                     reading_order: blocks.len(),
@@ -358,6 +375,10 @@ fn page_to_blocks(
             id: format!("p{}-form{k}", page.page_index),
             page_index: page.page_index,
             bbox: field.bbox,
+            page_spans: vec![PageBBox {
+                page: page.page_index as u32,
+                bbox: field.bbox,
+            }],
             kind: BlockKind::Paragraph,
             raw_text: render_form_field(field),
             reading_order: blocks.len(),
@@ -579,5 +600,29 @@ mod tests {
             bbox: crate::models::BBox::new(0.0, 0.0, 10.0, 10.0),
         };
         assert_eq!(render_form_field(&field), "- [ ] Agree");
+    }
+
+    #[tokio::test]
+    async fn split_paragraph_stitches_across_pages() {
+        let pdf = test_fixtures::split_paragraph_pdf();
+        let doc = assemble_document(
+            &pdf,
+            "split.pdf",
+            &ParserConfig::default(),
+            Arc::new(NoVlmProvider),
+        )
+        .await
+        .expect("assemble");
+        assert_eq!(doc.total_pages, 2);
+        assert!(
+            doc.markdown.contains("The example was hard."),
+            "markdown:\n{}",
+            doc.markdown
+        );
+        assert!(
+            !doc.markdown.contains("exam-"),
+            "hyphen stump leaked:\n{}",
+            doc.markdown
+        );
     }
 }

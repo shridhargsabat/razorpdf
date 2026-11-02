@@ -21,6 +21,8 @@ pub struct ParserConfig {
     pub triage_threshold: f32,
     /// Padding applied to VLM fallback region bboxes (points).
     pub vlm_region_pad_pt: f32,
+    /// Stitch tables/paragraphs split across page boundaries.
+    pub enable_cross_page_stitching: bool,
     /// VLM client configuration.
     pub vlm: VlmConfig,
 }
@@ -35,6 +37,7 @@ impl Default for ParserConfig {
             heading_size_mult: 1.15,
             triage_threshold: 0.45,
             vlm_region_pad_pt: 8.0,
+            enable_cross_page_stitching: true,
             vlm: VlmConfig::default(),
         }
     }

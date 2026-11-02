@@ -685,6 +685,18 @@ fn merged_widget(
     dict
 }
 
+/// Two-page split paragraph: page 0 ends mid-word, page 1 continues.
+/// 4 spans, 0 vectors.
+pub fn split_paragraph_pdf() -> Vec<u8> {
+    let mut p0 = String::new();
+    p0.push_str(&text("F1", 11.0, 72.0, 100.0, "First page intro."));
+    p0.push_str(&text("F1", 11.0, 72.0, 130.0, "The exam-"));
+    let mut p1 = String::new();
+    p1.push_str(&text("F1", 11.0, 72.0, 100.0, "ple was hard."));
+    p1.push_str(&text("F1", 11.0, 72.0, 130.0, "Closing line."));
+    build_pdf_multi(vec![p0, p1])
+}
+
 /// All fixtures as `(name, bytes)` pairs.
 pub fn all_fixtures() -> Vec<(&'static str, Vec<u8>)> {
     vec![

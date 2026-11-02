@@ -86,13 +86,15 @@ mod tests {
     use crate::models::BBox;
 
     fn block(order: usize, kind: BlockKind, text: &str) -> LayoutBlock {
+        let bbox = BBox::new(0.0, 0.0, 10.0, 10.0);
         LayoutBlock {
             id: format!("b{order}"),
             page_index: 0,
-            bbox: BBox::new(0.0, 0.0, 10.0, 10.0),
+            bbox,
             kind,
             raw_text: text.to_string(),
             reading_order: order,
+            page_spans: vec![crate::models::PageBBox { page: 0, bbox }],
         }
     }
 

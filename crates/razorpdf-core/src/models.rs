@@ -149,6 +149,16 @@ pub struct LayoutBlock {
     pub kind: BlockKind,
     pub raw_text: String,
     pub reading_order: usize,
+    /// Page/bbox provenance spans (first entry is always this block's own
+    /// page; cross-page stitching appends continuation pages).
+    pub page_spans: Vec<PageBBox>,
+}
+
+/// One page/bbox provenance span for stitched content.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PageBBox {
+    pub page: u32,
+    pub bbox: BBox,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
