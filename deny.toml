@@ -1,0 +1,46 @@
+# cargo-deny configuration for razorpdf (workspace license: MIT OR Apache-2.0)
+# Checked in CI (`deny` job in .github/workflows/ci.yml).
+
+[advisories]
+# Defaults: fail on vulnerabilities/yanked via the RustSec advisory DB.
+# paste is unmaintained (not vulnerable) and arrives deep-transitively via
+# image -> exr -> pulp; nothing to upgrade to, so it is allowlisted here.
+# pyo3 0.22 advisories: the vulnerable APIs (PyString::from_object,
+# PyCFunction::new_closure) are not used anywhere in razorpdf-py, so these
+# are not exploitable through our code. Full upgrade to pyo3 0.29 is tracked
+# separately (breaking changes across 7 releases); see the upgrade issue.
+# ttf-parser is unmaintained crate-wide (not vulnerable); it arrives
+# transitively via lopdf, so there is no version to upgrade to.
+ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2025-0020", "RUSTSEC-2026-0177", "RUSTSEC-2026-0192"]
+
+[licenses]
+# First-party crates are MIT OR Apache-2.0 (see workspace.package.license).
+# Dependencies must be permissive / weak-copyleft only — no GPL/AGPL/SSPL.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception", # target-lexicon (via pyo3 build)
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "OpenSSL",
+    "NCSA", # libfuzzer-sys (via image/rav1e); OSI-approved, FSF-free
+    "CDLA-Permissive-2.0", # webpki-roots CA data (via rustls); permissive
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are near-unavoidable in Cargo trees — warn, don't fail.
+multiple-versions = "warn"
+# Our own manifests pin explicit versions; keep it that way.
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
