@@ -28,7 +28,7 @@ doc = razorpdf.parse_file("paper.pdf")   # -> {"markdown": ..., "chunks": [...]}
 Prefer a binary? Grab one from [Releases](https://github.com/shridhargsabat/razorpdf/releases) (Linux shown):
 
 ```bash
-curl -L -o razorpdf.tar.gz https://github.com/shridhargsabat/razorpdf/releases/download/v0.1.5/razorpdf-v0.1.5-x86_64-unknown-linux-gnu.tar.gz
+curl -L -o razorpdf.tar.gz https://github.com/shridhargsabat/razorpdf/releases/download/v0.1.6/razorpdf-v0.1.6-x86_64-unknown-linux-gnu.tar.gz
 tar xzf razorpdf.tar.gz && ./razorpdf parse paper.pdf -o paper.md --json paper.json
 ```
 
