@@ -91,20 +91,37 @@ jobs:
         include:
           # One abi3 wheel per platform covers CPython 3.10+.
           # aarch64 builds natively on an ARM runner (no cross toolchain).
+          # Linux wheels build inside manylinux_2_28 containers (glibc 2.28+:
+          # RHEL8+/Debian10+/Ubuntu20.04+) -- host-built wheels came out as
+          # manylinux_2_39 and were uninstallable on older distros.
+          # NOTE: setup-python is IGNORED inside the containers, so Linux
+          # entries select the container interpreter explicitly (3.10+ is
+          # required for abi3-py310); the aarch64 entry overrides the
+          # action's default CROSS image with the official native image
+          # (no QEMU on the ARM runner).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+            container: quay.io/pypa/manylinux_2_28_x86_64:latest
+            interp: python3.10
             optional: false
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+            container: quay.io/pypa/manylinux_2_28_aarch64:latest
+            interp: python3.10
             optional: false
           - os: macos-latest
             target: aarch64-apple-darwin
+            interp: python
             optional: false
           - os: macos-latest
             target: x86_64-apple-darwin
+            interp: python
             optional: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            interp: python
             optional: false
     continue-on-error: ${{ matrix.optional }}
     runs-on: ${{ matrix.os }}
@@ -125,7 +142,10 @@ jobs:
         with:
           maturin-version: latest
           command: build
-          args: --release -m crates/razorpdf-py/Cargo.toml -o dist -i python --target ${{ matrix.target }}
+          # manylinux/container are ignored on non-Linux (empty there).
+          manylinux: ${{ matrix.manylinux }}
+          container: ${{ matrix.container }}
+          args: --release -m crates/razorpdf-py/Cargo.toml -o dist -i ${{ matrix.interp }} --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.target }}
