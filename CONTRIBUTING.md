@@ -1,5 +1,9 @@
 # Contributing to razorpdf
 
+> This project follows a [Code of Conduct](CODE_OF_CONDUCT.md). By
+> participating you agree to uphold it. Found a security issue? Please report
+> it privately per [SECURITY.md](SECURITY.md), not as a public issue.
+
 Bug reports, benchmark additions, and pull requests are welcome.
 
 ## Ground rules
