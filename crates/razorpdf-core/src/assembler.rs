@@ -19,7 +19,8 @@ use crate::extractor;
 use crate::geometry;
 use crate::models::PdfLinkAnnotation;
 use crate::models::{
-    BlockKind, FormFieldEntry, LayoutBlock, PageBBox, ParsedDocument, RawPageElements,
+    BlockKind, FootnoteItem, FormFieldEntry, GroundedChunk, LayoutBlock, LineCandidate, PageBBox,
+    ParsedDocument, RawPageElements, TriageReason,
 };
 use crate::triage::{self, PageTriage};
 use crate::vlm::{cropper, VlmProvider, VlmRequest};
@@ -54,7 +55,23 @@ where
         .map(|p| -> anyhow::Result<_> {
             let lines =
                 geometry::merge_spans_to_lines_with_threshold(&p.spans, config.line_merge_overlap)?;
+            // Deterministic math first: rewritten lines carry `$...$` text
+            // into tables, blocks, and triage-region checks below.
+            let (lines, math_boxes) = geometry::math_ast::rewrite_math_lines(lines, &p.vectors);
             let mut verdict = triage::score_page_with_lines(p, &lines, config);
+            // Math the reconstructor solved needs no VLM crop: drop
+            // covered MathGlyphCluster regions (mirrors table precedence).
+            if !verdict.fallback_regions.is_empty() && !math_boxes.is_empty() {
+                verdict.fallback_regions.retain(|region| {
+                    if !matches!(region.reason, TriageReason::MathGlyphCluster) {
+                        return true;
+                    }
+                    let area = region.content_bbox.area().max(1.0);
+                    !math_boxes.iter().any(|b| {
+                        b.intersection_area(&region.content_bbox) / area >= TABLE_REGION_PRECEDENCE
+                    })
+                });
+            }
             if !verdict.fallback_regions.is_empty() {
                 let tables = geometry::detect_all_tables(
                     &p.vectors,
@@ -106,6 +123,17 @@ where
         .zip(all_lines.par_iter())
         .map(|((page, tri), lines)| page_to_blocks(page, lines, tri, &resolved, config))
         .collect();
+    // 4b. Running header/footer strip + footnote extraction (sequential:
+    // cross-page repeats), before stitching so edge blocks never block
+    // merges, and before Markdown/chunk emission.
+    let page_sizes: Vec<(f32, f32)> = pages.iter().map(|p| (p.width, p.height)).collect();
+    let (footnotes, footnote_stats) = geometry::process_footnotes(&mut page_blocks, &page_sizes);
+    tracing::debug!(
+        stripped = footnote_stats.stripped_running_blocks,
+        footnotes = footnote_stats.footnotes_found,
+        linked = footnote_stats.markers_linked,
+        "footnote processing"
+    );
     let stitch_stats = geometry::stitch_across_pages(&mut page_blocks, config);
     tracing::debug!(
         tables_stitched = stitch_stats.tables_stitched,
@@ -118,7 +146,28 @@ where
         markdown_pages.push(emitter::blocks_to_markdown(blocks));
         all_blocks.extend(blocks.iter().cloned());
     }
-    let chunks = emitter::synthesize_chunks(&all_blocks, config.max_chunk_tokens);
+    let mut markdown = markdown_pages.join("\n");
+    if !footnotes.is_empty() {
+        markdown.push_str("\n\n");
+        for note in &footnotes {
+            markdown.push_str(&format!("[^{}]: {}\n", note.marker, note.text));
+        }
+    }
+    let mut chunks = emitter::synthesize_chunks(&all_blocks, config.max_chunk_tokens);
+    attach_chunk_footnotes(&mut chunks, &footnotes);
+    apply_page_triage_scores(&mut chunks, &triaged);
+    let mut form_fields: Vec<FormFieldEntry> = Vec::new();
+    for page in &pages {
+        form_fields.extend(page.form_fields.iter().cloned());
+    }
+    let mut text_lines: Vec<LineCandidate> = Vec::new();
+    for (page, lines) in pages.iter().zip(all_lines.iter()) {
+        text_lines.extend(lines.iter().map(|l| LineCandidate {
+            text: l.text.clone(),
+            page: page.page_index as u32,
+            bbox: l.bbox,
+        }));
+    }
 
     Ok(ParsedDocument {
         source_path: source_path.to_string(),
@@ -126,9 +175,47 @@ where
         fast_path_pages,
         vlm_fallback_regions,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        markdown: markdown_pages.join("\n"),
+        markdown,
         chunks,
+        form_fields,
+        footnotes,
+        text_lines,
     })
+}
+
+/// Attach footnote definitions cited by each chunk's `[^marker]` refs.
+/// Same-page definitions win; otherwise the first document-wide match.
+fn attach_chunk_footnotes(chunks: &mut [GroundedChunk], footnotes: &[FootnoteItem]) {
+    if footnotes.is_empty() {
+        return;
+    }
+    for chunk in chunks.iter_mut() {
+        for note in footnotes {
+            let reference = format!("[^{}]", note.marker);
+            if chunk.markdown.contains(&reference)
+                && !chunk.footnotes.iter().any(|f| f.marker == note.marker)
+                && (note.page == chunk.page_index as u32
+                    || !footnotes
+                        .iter()
+                        .any(|f| f.marker == note.marker && f.page == chunk.page_index as u32))
+            {
+                chunk.footnotes.push(note.clone());
+            }
+        }
+    }
+}
+
+/// Fill non-VLM chunks with their owning page's triage score (`vlm_region`
+/// chunks keep the region complexity set at synthesis).
+fn apply_page_triage_scores(chunks: &mut [GroundedChunk], triaged: &[PageTriage]) {
+    for chunk in chunks.iter_mut() {
+        if chunk.block_kind == "vlm_region" {
+            continue;
+        }
+        if let Some(verdict) = triaged.get(chunk.page_index) {
+            chunk.triage_score = verdict.score;
+        }
+    }
 }
 
 /// One VLM completion job with fully owned inputs.
@@ -598,8 +685,57 @@ mod tests {
             value: "Off".to_string(),
             field_type: "Btn".to_string(),
             bbox: crate::models::BBox::new(0.0, 0.0, 10.0, 10.0),
+            page: 0,
         };
         assert_eq!(render_form_field(&field), "- [ ] Agree");
+    }
+
+    #[test]
+    fn page_scores_fill_plain_chunks_not_vlm_ones() {
+        let bbox = crate::models::BBox::new(0.0, 0.0, 10.0, 10.0);
+        let mut chunks = vec![
+            GroundedChunk {
+                chunk_id: "p0-000".to_string(),
+                page_index: 0,
+                bbox,
+                breadcrumb: Vec::new(),
+                markdown: "Body.".to_string(),
+                token_estimate: 1,
+                parsed_by_vlm: false,
+                page_spans: Vec::new(),
+                footnotes: Vec::new(),
+                block_kind: "paragraph".to_string(),
+                triage_score: 0.0,
+            },
+            GroundedChunk {
+                chunk_id: "p1-000".to_string(),
+                page_index: 1,
+                bbox,
+                breadcrumb: Vec::new(),
+                markdown: "| a |".to_string(),
+                token_estimate: 1,
+                parsed_by_vlm: false,
+                page_spans: Vec::new(),
+                footnotes: Vec::new(),
+                block_kind: "vlm_region".to_string(),
+                triage_score: 0.88,
+            },
+        ];
+        let triaged = vec![
+            PageTriage {
+                score: 0.12,
+                is_scanned: false,
+                fallback_regions: Vec::new(),
+            },
+            PageTriage {
+                score: 0.91,
+                is_scanned: false,
+                fallback_regions: Vec::new(),
+            },
+        ];
+        apply_page_triage_scores(&mut chunks, &triaged);
+        assert!((chunks[0].triage_score - 0.12).abs() < 1e-6);
+        assert!((chunks[1].triage_score - 0.88).abs() < 1e-6);
     }
 
     #[tokio::test]

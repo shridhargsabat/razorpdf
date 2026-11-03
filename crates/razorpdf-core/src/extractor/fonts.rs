@@ -918,7 +918,7 @@ const MATH_FONT_FAMILIES: &[&str] = &[
 ];
 
 /// True for mathematical symbol fonts (`CMMI10`, `ABCDEF+CMSY10`, …).
-fn is_math_font(font_name: &str) -> bool {
+pub(crate) fn is_math_font(font_name: &str) -> bool {
     let base = font_name.rsplit('+').next().unwrap_or(font_name);
     let lower = base.to_lowercase();
     MATH_FONT_FAMILIES.iter().any(|f| lower.contains(f))

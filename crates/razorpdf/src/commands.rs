@@ -77,6 +77,63 @@ fn emit(
     Ok(())
 }
 
+/// Assemble offline (fast path + raw-text fallbacks, no VLM calls).
+async fn assemble_offline(input: &str) -> Result<razorpdf_core::ParsedDocument> {
+    let bytes = std::fs::read(input).with_context(|| format!("read {input}"))?;
+    let config = ParserConfig::default();
+    assembler::assemble_document(&bytes, input, &config, Arc::new(NoVlmProvider)).await
+}
+
+/// Extract structured JSON for a schema (file path or inline `{...}`).
+pub async fn schema(input: &str, schema_arg: &str, output: Option<&str>) -> Result<()> {
+    let text = if schema_arg.trim_start().starts_with('{') {
+        schema_arg.to_string()
+    } else {
+        std::fs::read_to_string(schema_arg).with_context(|| format!("read {schema_arg}"))?
+    };
+    let schema: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| "parse schema JSON")?;
+    let doc = assemble_offline(input).await?;
+    let result = extractor::extract_with_schema(&doc, &schema)?;
+    let pretty = serde_json::to_string_pretty(&result)?;
+    if let Some(path) = output {
+        std::fs::write(path, &pretty).with_context(|| format!("write {path}"))?;
+    } else {
+        println!("{pretty}");
+    }
+    Ok(())
+}
+
+/// Diff two revisions: Markdown redline by default, structured JSON with `--json`.
+pub async fn diff(old: &str, new: &str, as_json: bool, output: Option<&str>) -> Result<()> {
+    let old_doc = assemble_offline(old).await?;
+    let new_doc = assemble_offline(new).await?;
+    let report = razorpdf_core::emitter::diff_documents(&old_doc, &new_doc);
+    let text = if as_json {
+        serde_json::to_string_pretty(&report)?
+    } else {
+        razorpdf_core::emitter::to_markdown_diff(&report)
+    };
+    if let Some(path) = output {
+        std::fs::write(path, &text).with_context(|| format!("write {path}"))?;
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
+/// Emit grounded chunks as newline-delimited JSON.
+pub async fn jsonl(input: &str, output: Option<&str>) -> Result<()> {
+    let doc = assemble_offline(input).await?;
+    let text = razorpdf_core::emitter::chunks_to_jsonl(&doc.chunks)?;
+    if let Some(path) = output {
+        std::fs::write(path, &text).with_context(|| format!("write {path}"))?;
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
 /// Print per-page layout stats and triage decisions in a terminal table.
 pub fn inspect(input: &str) -> Result<()> {
     let bytes = std::fs::read(input).with_context(|| format!("read {input}"))?;

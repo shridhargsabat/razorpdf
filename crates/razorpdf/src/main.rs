@@ -29,6 +29,12 @@ enum Commands {
     Inspect(InspectArgs),
     /// Benchmark fast-path throughput on a synthetic multi-page document.
     Bench(BenchArgs),
+    /// Extract structured JSON matching a JSON Schema.
+    Schema(SchemaArgs),
+    /// Diff two PDF revisions (Markdown redline or structured JSON).
+    Diff(DiffArgs),
+    /// Emit grounded chunks as newline-delimited JSON.
+    Jsonl(JsonlArgs),
     /// Start the MCP JSON-RPC server over stdin/stdout.
     Mcp,
 }
@@ -76,6 +82,41 @@ struct BenchArgs {
     json: bool,
 }
 
+#[derive(clap::Args)]
+struct SchemaArgs {
+    /// Input PDF path.
+    input: String,
+    /// JSON Schema: inline `{...}` or path to a `.json` file.
+    #[arg(long)]
+    schema: String,
+    /// JSON output path (stdout when omitted).
+    #[arg(short, long)]
+    output: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct DiffArgs {
+    /// Old revision PDF path.
+    old: String,
+    /// New revision PDF path.
+    new: String,
+    /// Emit structured JSON instead of the Markdown redline.
+    #[arg(long)]
+    json: bool,
+    /// Output path (stdout when omitted).
+    #[arg(short, long)]
+    output: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct JsonlArgs {
+    /// Input PDF path.
+    input: String,
+    /// JSONL output path (stdout when omitted).
+    #[arg(short, long)]
+    output: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -100,6 +141,13 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Inspect(a)) => commands::inspect(&a.input),
         Some(Commands::Bench(a)) => commands::bench(a.pages, a.json).await,
+        Some(Commands::Schema(a)) => {
+            commands::schema(&a.input, &a.schema, a.output.as_deref()).await
+        }
+        Some(Commands::Diff(a)) => {
+            commands::diff(&a.old, &a.new, a.json, a.output.as_deref()).await
+        }
+        Some(Commands::Jsonl(a)) => commands::jsonl(&a.input, a.output.as_deref()).await,
         Some(Commands::Mcp) => mcp_server::run().await,
         None => {
             Cli::command().print_help()?;

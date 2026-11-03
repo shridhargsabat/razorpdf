@@ -47,7 +47,7 @@ pub fn extract_document(pdf: &[u8], _source_path: &str) -> Result<Vec<RawPageEle
         let fonts = font_map(&doc, page_dict).unwrap_or_default();
         let content_bytes = page_content(&doc, page_dict).context("page contents")?;
         let (forms, images) = collect_xobjects(&doc, page_dict, &fonts)?;
-        let (links, fields, seen) = page_annotations(&doc, page_dict, ml, mt);
+        let (links, fields, seen) = page_annotations(&doc, page_dict, ml, mt, page_index as u32);
         seen_annots.extend(seen);
         inputs.push(PageInput {
             page_index,
@@ -1511,6 +1511,7 @@ fn page_annotations(
     page_dict: &lopdf::Dictionary,
     origin_x: f32,
     top_y: f32,
+    page: u32,
 ) -> (
     Vec<PdfLinkAnnotation>,
     Vec<FormFieldEntry>,
@@ -1565,6 +1566,7 @@ fn page_annotations(
             value: attrs.value,
             field_type: attrs.field_type,
             bbox,
+            page,
         });
     }
     (links, fields, seen)
@@ -1631,6 +1633,7 @@ fn orphan_acroform_fields(doc: &Document, seen: &HashSet<ObjectId>) -> Vec<FormF
             value: attrs.value,
             field_type: attrs.field_type,
             bbox: BBox::new(0.0, 0.0, 0.0, 0.0),
+            page: 0,
         });
     }
     out

@@ -86,6 +86,9 @@ mod tests {
             token_estimate: 0,
             parsed_by_vlm: false,
             page_spans: vec![PageBBox { page: 0, bbox }],
+            footnotes: Vec::new(),
+            block_kind: "paragraph".to_string(),
+            triage_score: 0.0,
         }
     }
 

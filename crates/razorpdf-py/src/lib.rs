@@ -14,6 +14,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use razorpdf_core::{
     assembler,
+    emitter::{self},
+    extractor::extract_with_schema as core_extract_schema,
     vlm::{cropper::CanvasSource, HttpVlmProvider, NoVlmProvider},
     BBox, ParsedDocument, ParserConfig,
 };
@@ -214,6 +216,76 @@ fn render_citation_sync(
         .map_err(|e| e.to_string())
 }
 
+/// Extract structured JSON matching a JSON Schema document.
+///
+/// `schema_json` is a JSON object string with `properties` (and optional
+/// `required`). Returns `{data, provenance, overall_confidence}`.
+#[pyfunction]
+#[pyo3(signature = (path, schema_json))]
+fn extract_schema(py: Python<'_>, path: &str, schema_json: &str) -> PyResult<Py<PyAny>> {
+    let schema: serde_json::Value = serde_json::from_str(schema_json)
+        .map_err(|e| PyValueError::new_err(format!("schema_json: {e}")))?;
+    let path = path.to_string();
+    let result = py
+        .detach(|| {
+            let doc = assemble_sync(&path, None, None, true, true)?;
+            core_extract_schema(&doc, &schema).map_err(|e| e.to_string())
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    Ok(pythonize::pythonize(py, &result)?.unbind())
+}
+
+/// Compare two PDF revisions block-by-block.
+///
+/// Returns the structured diff (`blocks`, `unchanged`, `modified`,
+/// `added`, `removed`) plus a `markdown_diff` redline summary.
+#[pyfunction]
+#[pyo3(signature = (old_path, new_path))]
+fn diff_pdfs(py: Python<'_>, old_path: &str, new_path: &str) -> PyResult<Py<PyAny>> {
+    let old_path = old_path.to_string();
+    let new_path = new_path.to_string();
+    let (diff, markdown_diff) = py
+        .detach(|| {
+            let old_doc = assemble_sync(&old_path, None, None, true, true)?;
+            let new_doc = assemble_sync(&new_path, None, None, true, true)?;
+            let diff = emitter::diff_documents(&old_doc, &new_doc);
+            let markdown_diff = emitter::to_markdown_diff(&diff);
+            Ok::<_, String>((diff, markdown_diff))
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let mut value = serde_json::to_value(&diff)
+        .map_err(|e| PyRuntimeError::new_err(format!("encode diff: {e}")))?;
+    value["markdown_diff"] = serde_json::Value::String(markdown_diff);
+    Ok(pythonize::pythonize(py, &value)?.unbind())
+}
+
+/// Export chunks as a columnar dict of lists (`chunk_id`, `page`,
+/// `bbox_x0`, …, `text`) for `polars.from_dict` / `pyarrow.Table`.
+#[pyfunction]
+#[pyo3(signature = (path,))]
+fn to_columnar_dict(py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
+    let path = path.to_string();
+    let batch = py
+        .detach(|| {
+            let doc = assemble_sync(&path, None, None, true, true)?;
+            Ok::<_, String>(emitter::chunks_to_columnar_batch(&doc.chunks))
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    Ok(pythonize::pythonize(py, &batch)?.unbind())
+}
+
+/// Render grounded chunks as newline-delimited JSON.
+#[pyfunction]
+#[pyo3(signature = (path,))]
+fn to_jsonl(py: Python<'_>, path: &str) -> PyResult<String> {
+    let path = path.to_string();
+    py.detach(|| {
+        let doc = assemble_sync(&path, None, None, true, true)?;
+        emitter::chunks_to_jsonl(&doc.chunks).map_err(|e| e.to_string())
+    })
+    .map_err(PyRuntimeError::new_err)
+}
+
 /// Python module definition.
 #[pymodule]
 fn razorpdf(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -221,5 +293,9 @@ fn razorpdf(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(to_markdown, m)?)?;
     m.add_function(wrap_pyfunction!(search_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(render_citation, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(diff_pdfs, m)?)?;
+    m.add_function(wrap_pyfunction!(to_columnar_dict, m)?)?;
+    m.add_function(wrap_pyfunction!(to_jsonl, m)?)?;
     Ok(())
 }

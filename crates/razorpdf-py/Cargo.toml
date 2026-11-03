@@ -11,7 +11,7 @@ name = "razorpdf"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-razorpdf-core = { version = "0.2", path = "../razorpdf-core" }
+razorpdf-core = { version = "0.3", path = "../razorpdf-core" }
 pyo3.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -70,6 +70,8 @@ pub struct FormFieldEntry {
     pub value: String,
     pub field_type: String,
     pub bbox: BBox,
+    /// 0-based page index (catalog orphans without widgets land on 0).
+    pub page: u32,
 }
 
 /// Stream codec of an embedded image's bytes.
@@ -161,6 +163,18 @@ pub struct PageBBox {
     pub bbox: BBox,
 }
 
+/// One bottom-of-page footnote definition linked from body text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FootnoteItem {
+    /// Citation marker as printed (`1`, `[1]`, `*`, `†`).
+    pub marker: String,
+    /// Footnote body text (marker stripped).
+    pub text: String,
+    /// 0-based page index of the definition.
+    pub page: u32,
+    pub bbox: BBox,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundedChunk {
     pub chunk_id: String,
@@ -174,6 +188,14 @@ pub struct GroundedChunk {
     /// Page/bbox provenance (first entry is the chunk's own page; table
     /// sub-chunks and stitched content append continuation pages).
     pub page_spans: Vec<PageBBox>,
+    /// Footnotes cited by this chunk's markdown (`[^marker]` refs).
+    pub footnotes: Vec<FootnoteItem>,
+    /// Coarse layout kind from the originating block
+    /// (`heading`/`paragraph`/`code`/`list`/`table`/`vlm_region`).
+    pub block_kind: String,
+    /// Triage complexity: VLM-region score for `vlm_region` chunks, else
+    /// the owning page's triage score.
+    pub triage_score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,4 +207,93 @@ pub struct ParsedDocument {
     pub elapsed_ms: u64,
     pub markdown: String,
     pub chunks: Vec<GroundedChunk>,
+    /// Interactive form field states across all pages (`/AcroForm`).
+    pub form_fields: Vec<FormFieldEntry>,
+    /// Bottom-of-page footnote definitions in page order.
+    pub footnotes: Vec<FootnoteItem>,
+    /// Merged text lines (post-LaTeX-rewrite) for tight schema provenance.
+    pub text_lines: Vec<LineCandidate>,
+}
+
+/// One text line retained for tight schema-extraction provenance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LineCandidate {
+    pub text: String,
+    pub page: u32,
+    pub bbox: BBox,
+}
+
+/// One JSON-Schema property matched to document content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaFieldMatch {
+    pub field_name: String,
+    pub value: serde_json::Value,
+    pub confidence: f32,
+    pub page: u32,
+    pub bbox: BBox,
+    /// "acroform" | "inline_kv" | "spatial_kv" | "table_column".
+    pub source: String,
+}
+
+/// Structured extraction result with per-field provenance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaExtractionResult {
+    pub data: serde_json::Value,
+    pub provenance: Vec<SchemaFieldMatch>,
+    pub overall_confidence: f32,
+}
+
+/// Structure-of-Arrays chunk batch for Arrow/Polars/LanceDB ingestion.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ColumnarChunkBatch {
+    pub chunk_id: Vec<String>,
+    pub page: Vec<u32>,
+    pub bbox_x0: Vec<f32>,
+    pub bbox_y0: Vec<f32>,
+    pub bbox_x1: Vec<f32>,
+    pub bbox_y1: Vec<f32>,
+    pub token_count: Vec<usize>,
+    pub triage_score: Vec<f32>,
+    pub block_kind: Vec<String>,
+    pub section_path: Vec<String>,
+    pub text: Vec<String>,
+}
+
+/// Revision status of one diffed block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffStatus {
+    Unchanged,
+    Modified,
+    Added,
+    Removed,
+}
+
+/// One aligned block comparison between two document revisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockDiff {
+    pub status: DiffStatus,
+    pub section_path: String,
+    pub block_kind: String,
+    pub old_text: Option<String>,
+    pub new_text: Option<String>,
+    pub old_page: Option<u32>,
+    pub new_page: Option<u32>,
+    pub old_bbox: Option<BBox>,
+    pub new_bbox: Option<BBox>,
+    /// Token Jaccard similarity in [0.0, 1.0] (1.0 when unchanged).
+    pub similarity: f32,
+    /// Word-level (or table-row-level) delta summary.
+    pub delta_summary: String,
+}
+
+/// Structural comparison of two document revisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentDiff {
+    pub old_path: String,
+    pub new_path: String,
+    pub blocks: Vec<BlockDiff>,
+    pub unchanged: usize,
+    pub modified: usize,
+    pub added: usize,
+    pub removed: usize,
 }
