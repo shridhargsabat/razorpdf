@@ -203,7 +203,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: rust-lang/crates.io-auth-action@v1
+      - uses: rust-lang/crates-io-auth-action@v1.0.6
         id: auth
       # Core first: the CLI crate depends on the same-version core, and the
       # index needs a beat to serve it.
