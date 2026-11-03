@@ -339,6 +339,19 @@ Docling matches razorpdf on the GST invoice (5/5 markers, 3 table rows) — at ~
 
 *Reproduce:* `.venv/bin/python scripts/bench_wild.py` (after `maturin develop --release`). The corpus is gitignored — fetch it first per `tests/wild/README.md`; the script degrades gracefully on a partial corpus.
 
+### v0.2.0 Validation Run
+
+Re-ran on release bindings (`razorpdf 0.2.0`, `pypdf 6.21.4`, `pymupdf 2.1`) on an Intel i5-13420H (12 threads), partial corpus (3 fetched PDFs, 115 pages; the 2 generated invoices were not regenerated). Median of 3 runs after 1 warmup:
+
+| File | Pages | `razorpdf` | `pypdf` | `pymupdf` |
+| :--- | ---: | :--- | :--- | :--- |
+| `arxiv_attention_2col` | 15 | 129 ms (116 p/s) | 948 ms (16 p/s) | 59 ms (255 p/s) |
+| `arxiv_deepseek_tables` | 86 | 180 ms (477 p/s) | 1,752 ms (49 p/s) | 150 ms (574 p/s) |
+| `mozilla_tracemonkey_2col` | 14 | 82 ms (171 p/s) | 592 ms (24 p/s) | 53 ms (262 p/s) |
+| **TOTAL** | **115** | **391 ms (294 p/s)** | **3,291 ms (35 p/s)** | **262 ms (439 p/s)** |
+
+Triage metrics from `scripts/bench_omnidoc.py` on the same corpus (offline, `NoVlmProvider` — flagged regions keep raw text): attention 3 tables / 573 chunks / 45 VLM regions (math-font clusters from the new `MathGlyphCluster` triage), deepseek 12 / 3,817 / 60, tracemonkey 0 / 890 / 32. `samples/invoice.pdf`: 2,200 p/s, 1 table, 6 chunks, 0 VLM regions. Fidelity 5/5 on Attention for all backends; structure 13 Markdown table rows for `razorpdf`, 0 for flat extractors.
+
 *OmniDocBench-style harness:* `scripts/bench_omnidoc.py [PDF_DIR]` measures pages/sec, peak RSS, and table/chunk/VLM counts per file and writes `reports/omnidoc_scorecard.md`. With `<stem>.json` ground-truth sidecars (`{"text": ..., "tables": [...]}`), it also reports reading-order NED and table TEDS (Zhang-Shasha tree-edit similarity). `scripts/bench_omnidoc.py --selftest` validates the TEDS implementation without any PDFs.
 
 ## Triage Math
