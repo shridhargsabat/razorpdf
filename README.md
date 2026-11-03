@@ -156,6 +156,11 @@ razorpdf parse scan.pdf --vlm-url http://localhost:11434/v1/chat/completions
 
 # Run an offline demo of the VLM fallback path using the deterministic mock provider
 razorpdf parse messy.pdf --mock-vlm
+
+# Structured extraction, revision diffs, and JSONL chunk streams
+razorpdf schema invoice.pdf --schema '{"type":"object","properties":{"total":{"type":"number"}}}'
+razorpdf diff old.pdf new.pdf
+razorpdf jsonl paper.pdf -o chunks.jsonl
 ```
 
 From source: `git clone https://github.com/shridhargsabat/razorpdf.git && cd razorpdf && cargo build --release -p razorpdf`.
@@ -196,13 +201,24 @@ print(hits[0]["chunk_id"], hits[0]["page"], hits[0]["score"])
 # Highlighted citation crop of any region as WebP bytes (page is 1-based)
 webp = razorpdf.render_citation("paper.pdf", 1, [72.0, 100.0, 540.0, 200.0])
 open("cite.webp", "wb").write(webp)
+
+# Structured extraction into any JSON Schema (per-field bbox provenance)
+import json
+schema = json.dumps({"type": "object", "properties": {"total": {"type": "number"}}})
+result = razorpdf.extract_schema("invoice.pdf", schema)
+print(result["data"], result["overall_confidence"])
+
+# Revision diff, columnar export, and JSONL streaming
+diff = razorpdf.diff_pdfs("old.pdf", "new.pdf")
+batch = razorpdf.to_columnar_dict("paper.pdf")  # polars.from_dict(batch)
+jsonl = razorpdf.to_jsonl("paper.pdf")
 ```
 
 From source: `cd crates/razorpdf-py && pip install maturin && maturin develop --release`.
 
 ### 3. MCP Server (Claude Code / OpenCode / Hermes)
 
-`razorpdf` includes a built-in Model Context Protocol (MCP) JSON-RPC 2.0 server over `stdio` exposing seven tools: `parse_pdf`, `inspect_pdf_layout`, and `extract_pdf_tables`, plus progressive-disclosure tools `get_pdf_toc` (outline + per-page complexity scores), `search_pdf_chunks` (offline BM25 retrieval with bboxes), `read_pdf_page_range` (1-based page slices), and `render_pdf_region` (WebP image blocks with citation highlights). Parsed documents are cached in memory by path + mtime, so follow-up calls on the same PDF answer in milliseconds.
+`razorpdf` includes a built-in Model Context Protocol (MCP) JSON-RPC 2.0 server over `stdio` exposing ten tools: `parse_pdf`, `inspect_pdf_layout`, and `extract_pdf_tables`, plus progressive-disclosure tools `get_pdf_toc` (outline + per-page complexity scores), `search_pdf_chunks` (offline BM25 retrieval with bboxes), `read_pdf_page_range` (1-based page slices), `render_pdf_region` (WebP image blocks with citation highlights), `extract_pdf_schema` (structured JSON + field provenance), `diff_pdfs` (revision redlines), and `extract_pdf_annotations_and_forms` (links, form fields, footnotes). Parsed documents are cached in memory by path + mtime, so follow-up calls on the same PDF answer in milliseconds.
 
 **Claude Code:**
 
@@ -269,6 +285,9 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"parse_pdf"
 | `razorpdf parse <pdf> [-o out.md] [--json out.json] [--vlm-url URL] [--mock-vlm]` | Hybrid parse to Markdown + grounded JSON chunks |
 | `razorpdf inspect <pdf>` | Per-page spans, vectors, lines, tables, $S(R)$ scores, and fallback regions |
 | `razorpdf bench [--pages 400] [--json]` | Fast-path throughput benchmark on a synthetic multi-page document |
+| `razorpdf schema <pdf> --schema <path\|json> [-o out.json]` | Structured extraction into a JSON Schema (per-field bbox provenance) |
+| `razorpdf diff <old> <new> [--json] [-o out]` | Revision redline (Markdown) or structured block diff (JSON) |
+| `razorpdf jsonl <pdf> [-o out.jsonl]` | Grounded chunks as newline-delimited JSON |
 | `razorpdf mcp` (or `razorpdf --mcp`) | Start the MCP JSON-RPC 2.0 server over `stdio` |
 
 ## Examples
@@ -365,6 +384,7 @@ $$S(R) = \min(1.0, 0.40 \cdot p_{\text{overlap}} + 0.35 \cdot p_{\text{tab\_entr
 * $p_{\text{vector\_noise}}$: Density of diagonal vector segments intersecting text spans.
 * **Routing threshold:** Regions with $S(R) \ge 0.45$, scanned pages without text spans, and diagram clusters ($\ge 4$ vector segments) are padded, cropped to WebP, and sent to the configured VLM endpoint.
 * **Font-anomaly floors (v0.2.0):** regions additionally force $S(R) \ge 0.75$ when span mojibake (U+FFFD/PUA/control fallout from corrupt CMaps) exceeds 8%, and $S(R) \ge 0.55$ for math-font/symbol clusters and sub/superscript baseline oscillations — routed as `CorruptedCMapOrMojibake` / `MathGlyphCluster`.
+* **Deterministic math pre-pass (v0.3.0):** lines reconstructible to LaTeX at confidence $\ge 0.80$ (math glyphs, `_{}`/`^{}` baseline shifts, `\frac{}{}` bars) emit `$...$`/`$$...$$` directly and their `MathGlyphCluster` regions skip the VLM entirely.
 
 ## Project Structure
 
@@ -374,8 +394,8 @@ razorpdf/
 │   ├── razorpdf-core/            # Engine: extract -> geometry -> triage -> VLM -> emit
 │   │   ├── benches/throughput.rs # Criterion pages/sec benchmark suite
 │   │   └── examples/dump_fixtures.rs
-│   ├── razorpdf/             # Binary: parse / inspect / bench / mcp
-│   └── razorpdf-py/              # PyO3 bindings: parse_file / to_markdown / search_chunks / render_citation (+ GIL release)
+│   ├── razorpdf/             # Binary: parse / inspect / bench / schema / diff / jsonl / mcp
+│   └── razorpdf-py/              # PyO3 bindings: parse_file / to_markdown / search_chunks / render_citation / extract_schema / diff_pdfs / to_columnar_dict / to_jsonl (+ GIL release, .pyi stubs)
 ├── scripts/
 │   ├── bench_wild.py             # Real-world PDF benchmark vs pypdf, pdfminer.six, pymupdf
 │   └── bench_omnidoc.py          # OmniDocBench-style harness: throughput, RSS, NED, table TEDS
@@ -386,11 +406,11 @@ razorpdf/
 
 * **Completed (Phases 1–6):** Core geometric extraction, recursive XY-cut layout engine, R-tree vector table reconstruction, $S(R)$ triage scorer, sub-page WebP VLM client, MCP `stdio` server, and PyO3 bindings.
 * **Completed (v0.2.0):** Corrupt-CMap/math-glyph triage routing, hyperlink + AcroForm extraction, cross-page table/paragraph stitching, header-preserving token chunking with `page_spans` provenance, visual citation overlays, blake3 VLM response cache, 7-tool progressive-disclosure MCP server (TOC/BM25/page-range/region-render), expanded Python bindings, and the OmniDocBench-style benchmark harness.
+* **Completed (v0.3.0):** Deterministic spatial JSON Schema extractor (AcroForm/inline/spatial/table tiers with bbox provenance), running header/footer stripper + footnote graph linker (`[^n]`), deterministic math-to-LaTeX reconstructor (`_{}`, `^{}`, `\frac{}{}`), columnar Arrow/Polars export + JSONL, structural PDF diff engine, 10-tool MCP server, `schema`/`diff`/`jsonl` CLI subcommands, 8-function Python API with PEP 561 stubs, and LaTeX-aware math triage.
 * **Planned:**
   * `pdfium` render backend (`--features pdfium`)
   * Exact token counting via vendored `tiktoken` ranks (currently opt-in download + heuristic fallback)
   * Local ONNX micro-tier for offline formula/table recognition
-  * JSON-schema-guided extraction mode
 
 ## Contributing
 

@@ -3,6 +3,57 @@
 All notable changes to razorpdf are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.3.0] - 2026-11-03
+
+Six-phase flagship upgrade: spatial schema extraction, footnote graphs,
+deterministic math-to-LaTeX, columnar export, a structural diff engine,
+and a 10-tool MCP server with full Python typing.
+
+### Added — Phase 1: Deterministic spatial JSON Schema extractor
+
+- `extractor::schema::extract_with_schema()` with 4-tier matching:
+  AcroForm fields (0.98), inline `Label: value` lines (0.85), spatial
+  right-of/below chunk adjacency (0.70), and table header-to-row mapping
+  for arrays of objects (0.90), all with `[x0, y0, x1, y1]` provenance.
+- `SchemaFieldMatch` / `SchemaExtractionResult` models; `page` on
+  `FormFieldEntry`; `form_fields` collected on `ParsedDocument`.
+
+### Added — Phase 2: Running header/footer stripper & footnote linker
+
+- `geometry::footnotes::process_pages()`: digit-blind repeat detection
+  strips running bands (≥3 pages, ±6pt); bottom-zone `1`/`[1]`/`*`/`†`
+  definitions become `FootnoteItem`s with `[^n]` body links.
+- `footnotes` on `ParsedDocument` and `GroundedChunk`; definitions
+  appended to document Markdown.
+
+### Added — Phase 3: Deterministic math-to-LaTeX reconstructor
+
+- `geometry::math_ast::reconstruct_latex_from_spans()`: math-glyph
+  mapping, `_{sub}`/`^{sup}` baseline grouping, `\frac{}{}` bar
+  detection; lines at confidence ≥ 0.80 emit `$...$`/`$$...$$` and skip
+  VLM (`MathGlyphCluster` regions dropped at ≥70% line overlap).
+
+### Added — Phase 4: Columnar export & structural diff engine
+
+- `emitter::columnar::{chunks_to_jsonl, chunks_to_columnar_batch()}`
+  (`ColumnarChunkBatch` Structure-of-Arrays for Arrow/Polars/LanceDB).
+- `emitter::diff::{diff_documents, to_markdown_diff()}` classifying
+  Unchanged/Modified/Added/Removed blocks with dual bboxes, Jaccard
+  alignment, and word/table-row delta summaries.
+
+### Added — Phase 5: 10-tool MCP server & CLI subcommands
+
+- MCP tools `extract_pdf_schema`, `diff_pdfs`, and
+  `extract_pdf_annotations_and_forms` (10 total, mtime-cache backed).
+- CLI: `razorpdf schema --schema <path|json>`, `razorpdf diff <old>
+  <new> [--json]`, `razorpdf jsonl`.
+
+### Added — Phase 6: Python API, PEP 561 stubs & release verification
+
+- `extract_schema`, `diff_pdfs`, `to_columnar_dict`, `to_jsonl`
+  bindings (GIL released via `py.detach()`); `__init__.pyi` +
+  `py.typed` shipped in the wheel; `tests/test_py_smoke_v03.py`.
+
 ## [0.2.0] - 2026-11-03
 
 Six-phase hybrid-engine upgrade: corrupt-font triage, cross-page
@@ -69,4 +120,5 @@ a progressive-disclosure MCP server, and expanded Python bindings.
 - `tests/test_py_smoke_v02.py`: 6-test wheel smoke suite covering all
   four bindings plus concurrent-parse GIL release.
 
+[0.3.0]: https://github.com/shridhargsabat/razorpdf/releases/tag/v0.3.0
 [0.2.0]: https://github.com/shridhargsabat/razorpdf/releases/tag/v0.2.0

@@ -298,3 +298,17 @@ Executed from `razorpdf_v02_implementation_plan.md` on branch `feat/v0.2.0`, one
 * **Phase 6 (Python + bench):** `search_chunks` / `render_citation` bindings with `stitch_pages` / `use_cache` options (verified against a real wheel), `scripts/bench_omnidoc.py` (throughput/RSS/NED/Zhang-Shasha TEDS + scorecard), README + roadmap updates.
 
 **Deliberate deltas vs the plan:** triage integrated through the existing signal pipeline (no `compute_region_triage_score` exists); pdfium work landed in `lopdf_fallback` (backend is a delegating stub); column IoU and sub-chunk boxes use even splits (no per-column/row geometry at block level); untestable "consonant cluster" signal dropped; regex boost implemented as substring boost (no new dep); ONNX micro-tier, JSON-schema mode, and `--cite-bbox`/`--schema`/`--no-cache` CLI flags deferred (absent from the execution prompt).
+
+## 7. v0.3.0 Implementation Record (Agent Hermes)
+
+Executed from `razorpdf_v03_implementation_plan.md` on `main` past the `v0.2.0` tag, phases in strict order, each gated on `cargo fmt --check`, `cargo clippy -- -D warnings`, and the workspace suite (242 Rust tests + 12 Python smoke tests green).
+
+* **Step 0 (checkpoint):** tree was clean at the v0.2.0 validation commit with tag `v0.2.0` present — no commit needed; bumped workspace + `pyproject` + path-dep pins from `0.2` to `0.3`.
+* **Phase 1 (schema):** `extractor/schema.rs` 4-tier `extract_with_schema()` (acroform 0.98 / inline 0.85 / spatial 0.70 / table 0.90) with currency-stripping coercion; `page` added to `FormFieldEntry`, `form_fields` collected on `ParsedDocument`.
+* **Phase 2 (footnotes):** `geometry/footnotes.rs` running-band strip (digit-blind, ±6pt, ≥3 pages) + bottom-zone def extraction + same-page `[^n]` linking; wired pre-stitch in the assembler with chunk attachment and Markdown def section.
+* **Phase 3 (math):** `geometry/math_ast.rs` glyph/script/fraction reconstruction returning inner LaTeX + confidence; `rewrite_math_lines()` wraps `$`/`$$` pre-triage and drops covered `MathGlyphCluster` regions at ≥70% overlap.
+* **Phase 4 (columnar + diff):** `emitter/columnar.rs` (`chunks_to_jsonl`, `chunks_to_columnar_batch`) and `emitter/diff.rs` (`diff_documents` with Jaccard alignment, `to_markdown_diff` redlines); `ColumnarChunkBatch`, `BlockDiff`, `DocumentDiff`, `DiffStatus` models.
+* **Phase 5 (MCP + CLI):** `extract_pdf_schema`, `diff_pdfs`, `extract_pdf_annotations_and_forms` (10 tools, round-trip tested); `schema`/`diff`/`jsonl` CLI subcommands (live-verified on `samples/invoice.pdf`).
+* **Phase 6 (Python + release):** `extract_schema` / `diff_pdfs` / `to_columnar_dict` / `to_jsonl` bindings with `detach()`; `__init__.pyi` + `py.typed` verified inside the built wheel; `tests/test_py_smoke_v03.py` (6 tests); README/plan/CHANGELOG updated; `cargo package --list` verified.
+
+**Deliberate deltas vs the plan:** spatial/table tiers work from chunk Markdown + chunk bboxes (no span-level data survives in `ParsedDocument`); stub lives at `python/razorpdf/__init__.pyi` (the only path maturin ships) instead of crate-root `razorpdf.pyi`; `block_kind` sniffed from chunk Markdown and `triage_score` defaulted to 0.0 (chunks carry neither); CLI ships as `schema`/`diff`/`jsonl` subcommands rather than `--format jsonl`; VLM escalation for low-confidence schema fields left to callers (no VLM inside the extractor).

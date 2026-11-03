@@ -2,11 +2,14 @@
 
 pub mod bbox;
 pub mod cross_page;
+pub mod footnotes;
 pub mod lines;
+pub mod math_ast;
 pub mod table_grid;
 pub mod xy_cut;
 
 pub use cross_page::{stitch_across_pages, CrossPageStitchStats};
+pub use footnotes::{process_pages as process_footnotes, FootnoteStats};
 
 pub use lines::{
     body_font_size, classify_heading, classify_heading_with_mult, median_font_size,

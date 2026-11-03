@@ -2265,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "razorpdf"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "razorpdf-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2307,7 +2307,7 @@ dependencies = [
 
 [[package]]
 name = "razorpdf-py"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "pyo3",

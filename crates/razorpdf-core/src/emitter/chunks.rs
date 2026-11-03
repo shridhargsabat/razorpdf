@@ -65,6 +65,26 @@ fn chunk_for(block: &LayoutBlock, breadcrumb: Vec<String>, markdown: String) -> 
             }
         ),
         page_spans: block.page_spans.clone(),
+        footnotes: Vec::new(),
+        block_kind: kind_label(&block.kind).to_string(),
+        triage_score: match &block.kind {
+            BlockKind::VlmFallbackRegion {
+                complexity_score, ..
+            } => *complexity_score,
+            _ => 0.0,
+        },
+    }
+}
+
+/// Coarse layout-kind label for chunk metadata and columnar export.
+fn kind_label(kind: &BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Heading { .. } => "heading",
+        BlockKind::Paragraph => "paragraph",
+        BlockKind::CodeBlock => "code",
+        BlockKind::ListItem { .. } => "list",
+        BlockKind::DeterministicTable { .. } => "table",
+        BlockKind::VlmFallbackRegion { .. } => "vlm_region",
     }
 }
 
@@ -166,6 +186,9 @@ fn split_table_chunks(
                 markdown,
                 parsed_by_vlm: false,
                 page_spans: block.page_spans.clone(),
+                footnotes: Vec::new(),
+                block_kind: kind_label(&block.kind).to_string(),
+                triage_score: 0.0,
             }
         })
         .collect()
@@ -230,6 +253,30 @@ mod tests {
         assert_eq!(estimate_tokens(""), 0);
         assert_eq!(estimate_tokens("abcd"), 1);
         assert_eq!(estimate_tokens("abcde"), 2);
+    }
+
+    #[test]
+    fn chunks_carry_real_block_kind_and_vlm_score() {
+        let blocks = vec![
+            block(0, BlockKind::Heading { level: 1 }, "Title"),
+            block(1, BlockKind::Paragraph, "Body text here."),
+            block(
+                2,
+                BlockKind::VlmFallbackRegion {
+                    reason: crate::models::TriageReason::MathGlyphCluster,
+                    complexity_score: 0.77,
+                    resolved_markdown: None,
+                },
+                "x^2",
+            ),
+        ];
+        let chunks = synthesize_chunks(&blocks, 512);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].block_kind, "heading");
+        assert_eq!(chunks[1].block_kind, "paragraph");
+        assert_eq!(chunks[2].block_kind, "vlm_region");
+        assert!((chunks[2].triage_score - 0.77).abs() < 1e-6);
+        assert_eq!(chunks[0].triage_score, 0.0);
     }
 
     #[test]

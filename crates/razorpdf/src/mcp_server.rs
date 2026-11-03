@@ -4,7 +4,8 @@
 //! one response line per request on stdout. Methods: `initialize`, `ping`,
 //! `tools/list`, `tools/call` with tools `parse_pdf`, `inspect_pdf_layout`,
 //! `extract_pdf_tables`, `get_pdf_toc`, `search_pdf_chunks`,
-//! `read_pdf_page_range`, and `render_pdf_region`. Tool failures return
+//! `read_pdf_page_range`, `render_pdf_region`, `extract_pdf_schema`,
+//! `diff_pdfs`, and `extract_pdf_annotations_and_forms`. Tool failures return
 //! `isError` results per MCP convention; malformed traffic gets JSON-RPC
 //! protocol errors.
 
@@ -20,7 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use razorpdf_core::{
-    assembler, extractor, geometry, search, triage,
+    assembler, emitter, extractor, geometry, search, triage,
     vlm::{HttpVlmProvider, MockVlmProvider, NoVlmProvider},
     BBox, GroundedChunk, ParsedDocument, ParserConfig,
 };
@@ -182,6 +183,41 @@ fn tools_list() -> Value {
                         "highlight": {"type": "boolean", "description": "Draw the citation highlight + border (default true)."}
                     }
                 }
+            },
+            {
+                "name": "extract_pdf_schema",
+                "description": "Extract structured JSON matching a JSON Schema via AcroForm, inline/spatial key-value, and table-column matching, with per-field bbox provenance.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["path", "schema"],
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path to the input PDF."},
+                        "schema": {"type": "object", "description": "JSON Schema object with properties (and optional required)."}
+                    }
+                }
+            },
+            {
+                "name": "diff_pdfs",
+                "description": "Compare two PDF revisions block-by-block (Unchanged/Modified/Added/Removed) with bounding boxes and a Markdown redline.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["old_path", "new_path"],
+                    "properties": {
+                        "old_path": {"type": "string", "description": "Absolute path to the old revision PDF."},
+                        "new_path": {"type": "string", "description": "Absolute path to the new revision PDF."}
+                    }
+                }
+            },
+            {
+                "name": "extract_pdf_annotations_and_forms",
+                "description": "List hyperlink annotations (/URI), AcroForm field values, and linked footnotes with page numbers and bounding boxes.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path to the input PDF."}
+                    }
+                }
             }
         ]
     })
@@ -212,6 +248,9 @@ async fn tools_call(id: Value, params: Option<&Value>) -> Value {
         "get_pdf_toc" => tool_get_pdf_toc(&args).await,
         "search_pdf_chunks" => tool_search_pdf_chunks(&args).await,
         "read_pdf_page_range" => tool_read_pdf_page_range(&args).await,
+        "extract_pdf_schema" => tool_extract_pdf_schema(&args).await,
+        "diff_pdfs" => tool_diff_pdfs(&args).await,
+        "extract_pdf_annotations_and_forms" => tool_extract_pdf_annotations_and_forms(&args).await,
         _ => return error_response(id, -32602, "Unknown tool"),
     };
     match outcome {
@@ -757,6 +796,60 @@ fn region_raw_text(page: &razorpdf_core::RawPageElements, content: razorpdf_core
         .join(" ")
 }
 
+async fn tool_extract_pdf_schema(args: &Value) -> Result<String, String> {
+    let path = arg_path(args)?;
+    let schema = args
+        .get("schema")
+        .filter(|s| s.is_object())
+        .ok_or_else(|| "missing required argument: schema (JSON object)".to_string())?;
+    let doc = cached_document(&path).await?;
+    let result = extractor::extract_with_schema(&doc, schema).map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
+async fn tool_diff_pdfs(args: &Value) -> Result<String, String> {
+    let old_path = args
+        .get("old_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing required argument: old_path".to_string())?;
+    let new_path = args
+        .get("new_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing required argument: new_path".to_string())?;
+    let old_doc = cached_document(old_path).await?;
+    let new_doc = cached_document(new_path).await?;
+    let diff = emitter::diff_documents(&old_doc, &new_doc);
+    let markdown_diff = emitter::to_markdown_diff(&diff);
+    let mut value = serde_json::to_value(&diff).map_err(|e| e.to_string())?;
+    value["markdown_diff"] = Value::String(markdown_diff);
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+async fn tool_extract_pdf_annotations_and_forms(args: &Value) -> Result<String, String> {
+    let path = arg_path(args)?;
+    let doc = cached_document(&path).await?;
+    // Links live on raw pages (assembler only borrows them for anchors).
+    let bytes = read_pdf(&path)?;
+    let pages = extractor::extract_document(&bytes, &path).map_err(|e| e.to_string())?;
+    let mut links = Vec::new();
+    for page in &pages {
+        for link in &page.link_annotations {
+            links.push(json!({
+                "page": page.page_index + 1,
+                "bbox": link.bbox,
+                "uri": link.uri,
+            }));
+        }
+    }
+    serde_json::to_string_pretty(&json!({
+        "source_path": doc.source_path.clone(),
+        "links": links,
+        "form_fields": doc.form_fields,
+        "footnotes": doc.footnotes,
+    }))
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn list_advertises_seven_tools() {
+    fn list_advertises_ten_tools() {
         let list = tools_list();
         let names: Vec<&str> = list
             .get("tools")
@@ -801,7 +894,7 @@ mod tests {
             .iter()
             .filter_map(|t| t.get("name").and_then(Value::as_str))
             .collect();
-        assert_eq!(names.len(), 7);
+        assert_eq!(names.len(), 10);
         for expected in [
             "parse_pdf",
             "inspect_pdf_layout",
@@ -810,6 +903,9 @@ mod tests {
             "search_pdf_chunks",
             "read_pdf_page_range",
             "render_pdf_region",
+            "extract_pdf_schema",
+            "diff_pdfs",
+            "extract_pdf_annotations_and_forms",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
@@ -943,6 +1039,77 @@ mod tests {
         let path = fixture_file("q", razorpdf_core::test_fixtures::single_col_clean_pdf());
         let out = call_tool("search_pdf_chunks", json!({"path": path, "query": "  "})).await;
         assert!(is_error(&out));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn schema_tool_returns_structured_result() {
+        let path = fixture_file(
+            "schema",
+            razorpdf_core::test_fixtures::single_col_clean_pdf(),
+        );
+        let schema = json!({
+            "type": "object",
+            "properties": {"title": {"type": "string", "title": "Document Title"}}
+        });
+        let out = call_tool(
+            "extract_pdf_schema",
+            json!({"path": path, "schema": schema}),
+        )
+        .await;
+        assert!(!is_error(&out), "{}", result_text(&out));
+        let parsed: Value = serde_json::from_str(result_text(&out)).expect("json");
+        assert!(parsed.get("data").is_some());
+        assert!(parsed.get("provenance").is_some());
+        assert!(parsed.get("overall_confidence").is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn schema_tool_requires_schema_arg() {
+        let path = fixture_file(
+            "schema-err",
+            razorpdf_core::test_fixtures::single_col_clean_pdf(),
+        );
+        let out = call_tool("extract_pdf_schema", json!({"path": path})).await;
+        assert!(is_error(&out));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn diff_tool_compares_revisions() {
+        let old = fixture_file(
+            "diff-old",
+            razorpdf_core::test_fixtures::single_col_clean_pdf(),
+        );
+        let new = fixture_file(
+            "diff-new",
+            razorpdf_core::test_fixtures::single_col_clean_pdf(),
+        );
+        let out = call_tool("diff_pdfs", json!({"old_path": old, "new_path": new})).await;
+        assert!(!is_error(&out), "{}", result_text(&out));
+        let parsed: Value = serde_json::from_str(result_text(&out)).expect("json");
+        assert!(parsed["unchanged"].as_u64().unwrap() > 0);
+        assert_eq!(parsed["modified"], 0);
+        assert_eq!(parsed["added"], 0);
+        assert_eq!(parsed["removed"], 0);
+        assert!(parsed.get("markdown_diff").is_some());
+        let _ = std::fs::remove_file(parsed["old_path"].as_str().unwrap());
+        let _ = std::fs::remove_file(parsed["new_path"].as_str().unwrap());
+    }
+
+    #[tokio::test]
+    async fn annotations_tool_lists_links_forms_footnotes() {
+        let path = fixture_file(
+            "annots",
+            razorpdf_core::test_fixtures::single_col_clean_pdf(),
+        );
+        let out = call_tool("extract_pdf_annotations_and_forms", json!({"path": path})).await;
+        assert!(!is_error(&out), "{}", result_text(&out));
+        let parsed: Value = serde_json::from_str(result_text(&out)).expect("json");
+        assert!(parsed.get("links").is_some());
+        assert!(parsed.get("form_fields").is_some());
+        assert!(parsed.get("footnotes").is_some());
         let _ = std::fs::remove_file(&path);
     }
 }
