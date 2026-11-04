@@ -6,6 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/razorpdf.svg)](https://crates.io/crates/razorpdf)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://github.com/shridhargsabat/razorpdf)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://github.com/shridhargsabat/razorpdf/tree/main/crates/razorpdf-py)
+[![M8ven Score](https://m8ven.ai/badge/mcp/shridhargsabat-razorpdf-yhjx8t)](https://m8ven.ai/mcp/shridhargsabat-razorpdf-yhjx8t?s=readme)
 
 **Ultra-fast, local-first PDF parser: PDFs in, clean LLM-ready Markdown plus grounded RAG chunks out.**
 
