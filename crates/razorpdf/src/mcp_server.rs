@@ -95,7 +95,7 @@ fn text_content(text: String, is_error: bool) -> Value {
 }
 
 fn tools_list() -> Value {
-    json!({
+    let mut list = json!({
         "tools": [
             {
                 "name": "parse_pdf",
@@ -220,7 +220,24 @@ fn tools_list() -> Value {
                 }
             }
         ]
-    })
+    });
+    // MCP tool annotations (ToolAnnotations): every tool declares all four
+    // hints explicitly so hosts and directories never infer them. All tools
+    // are read-only, non-destructive, and side-effect idempotent; only
+    // `parse_pdf` can touch the network (caller-supplied `vlm_url` or the
+    // `RAZORPDF_VLM_URL` env var), so it alone is open-world.
+    if let Some(tools) = list.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools {
+            let open_world = tool.get("name").and_then(Value::as_str) == Some("parse_pdf");
+            tool["annotations"] = json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": open_world,
+            });
+        }
+    }
+    list
 }
 
 async fn tools_call(id: Value, params: Option<&Value>) -> Value {
@@ -908,6 +925,42 @@ mod tests {
             "extract_pdf_annotations_and_forms",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+    }
+
+    #[test]
+    fn list_tools_carry_complete_annotations() {
+        let list = tools_list();
+        let tools = list
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("tools array");
+        // Non-vacuous: the per-tool loop below must cover all ten tools.
+        assert_eq!(tools.len(), 10);
+        for tool in tools {
+            let name = tool.get("name").and_then(Value::as_str).expect("tool name");
+            let ann = tool
+                .get("annotations")
+                .unwrap_or_else(|| panic!("{name} advertises no annotations"));
+            for hint in [
+                "readOnlyHint",
+                "destructiveHint",
+                "idempotentHint",
+                "openWorldHint",
+            ] {
+                assert!(
+                    ann.get(hint).and_then(Value::as_bool).is_some(),
+                    "{name} missing explicit boolean {hint}"
+                );
+            }
+            assert_eq!(ann["readOnlyHint"], true, "{name} must be read-only");
+            assert_eq!(
+                ann["destructiveHint"], false,
+                "{name} must be non-destructive"
+            );
+            assert_eq!(ann["idempotentHint"], true, "{name} must be idempotent");
+            // parse_pdf alone can dial out (caller-supplied vlm_url / env).
+            assert_eq!(ann["openWorldHint"], name == "parse_pdf", "{name}");
         }
     }
 
