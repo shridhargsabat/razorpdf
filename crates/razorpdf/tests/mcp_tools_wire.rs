@@ -109,3 +109,82 @@ fn first_block(response: &serde_json::Value) -> &serde_json::Value {
 fn is_tool_error(response: &serde_json::Value) -> bool {
     response["result"]["isError"].as_bool().unwrap_or(false)
 }
+
+#[test]
+fn wire_toc_lists_headings_and_scores() {
+    let path = fixture_pdf("wire-toc", razorpdf_core::test_fixtures::single_col_clean_pdf());
+    let mut mcp = McpClient::spawn();
+    let out = mcp.call_tool("get_pdf_toc", serde_json::json!({"path": path}));
+    assert!(!is_tool_error(&out), "{}", tool_text(&out));
+    let parsed: serde_json::Value = serde_json::from_str(tool_text(&out)).expect("json");
+    assert_eq!(parsed["total_pages"], 1);
+    assert!(parsed["toc"][0]["title"]
+        .as_str()
+        .unwrap()
+        .contains("RazorPDF Benchmark"));
+    assert_eq!(parsed["toc"][0]["level"], 1);
+    assert_eq!(parsed["toc"][0]["page"], 1);
+    assert!(!parsed["toc"][0]["chunk_id"].as_str().unwrap().is_empty());
+    assert_eq!(parsed["page_scores"].as_array().expect("scores").len(), 1);
+}
+
+#[test]
+fn wire_search_finds_term_with_bbox() {
+    let path = fixture_pdf(
+        "wire-search",
+        razorpdf_core::test_fixtures::single_col_clean_pdf(),
+    );
+    let mut mcp = McpClient::spawn();
+    let out = mcp.call_tool(
+        "search_pdf_chunks",
+        serde_json::json!({"path": path, "query": "Benchmark", "top_k": 3}),
+    );
+    assert!(!is_tool_error(&out), "{}", tool_text(&out));
+    let parsed: serde_json::Value = serde_json::from_str(tool_text(&out)).expect("json");
+    let hits = parsed["hits"].as_array().expect("hits");
+    assert!(!hits.is_empty());
+    assert!(hits[0]["markdown"].as_str().unwrap().contains("Benchmark"));
+    assert!(hits[0].get("bbox").is_some());
+    assert_eq!(hits[0]["page"], 1);
+    assert!(hits.len() <= 3);
+
+    // Blank queries are tool errors, not crashes or empty successes.
+    let blank = mcp.call_tool(
+        "search_pdf_chunks",
+        serde_json::json!({"path": path, "query": "  "}),
+    );
+    assert!(is_tool_error(&blank));
+}
+
+#[test]
+fn wire_page_range_slices_first_page() {
+    let path = fixture_pdf("wire-range", razorpdf_core::test_fixtures::split_paragraph_pdf());
+    let mut mcp = McpClient::spawn();
+    let out = mcp.call_tool(
+        "read_pdf_page_range",
+        serde_json::json!({"path": path, "start_page": 1, "end_page": 1}),
+    );
+    assert!(!is_tool_error(&out), "{}", tool_text(&out));
+    let parsed: serde_json::Value = serde_json::from_str(tool_text(&out)).expect("json");
+    assert_eq!(parsed["total_pages"], 2);
+    let chunks = parsed["chunks"].as_array().expect("chunks");
+    assert!(!chunks.is_empty());
+    for chunk in chunks {
+        assert_eq!(chunk["page_index"], 0);
+    }
+    assert!(!parsed["markdown"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn wire_render_region_returns_webp_image() {
+    let path = fixture_pdf("wire-render", razorpdf_core::test_fixtures::bordered_table_pdf());
+    let mut mcp = McpClient::spawn();
+    let out = mcp.call_tool(
+        "render_pdf_region",
+        serde_json::json!({"path": path, "page": 1, "bbox": [0.0, 0.0, 612.0, 792.0], "highlight": true}),
+    );
+    let block = first_block(&out);
+    assert_eq!(block["type"], "image");
+    assert_eq!(block["mimeType"], "image/webp");
+    assert!(block["data"].as_str().unwrap().starts_with("UklGR")); // base64 RIFF
+}
