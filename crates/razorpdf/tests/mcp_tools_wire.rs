@@ -112,7 +112,10 @@ fn is_tool_error(response: &serde_json::Value) -> bool {
 
 #[test]
 fn wire_toc_lists_headings_and_scores() {
-    let path = fixture_pdf("wire-toc", razorpdf_core::test_fixtures::single_col_clean_pdf());
+    let path = fixture_pdf(
+        "wire-toc",
+        razorpdf_core::test_fixtures::single_col_clean_pdf(),
+    );
     let mut mcp = McpClient::spawn();
     let out = mcp.call_tool("get_pdf_toc", serde_json::json!({"path": path}));
     assert!(!is_tool_error(&out), "{}", tool_text(&out));
@@ -158,7 +161,10 @@ fn wire_search_finds_term_with_bbox() {
 
 #[test]
 fn wire_page_range_slices_first_page() {
-    let path = fixture_pdf("wire-range", razorpdf_core::test_fixtures::split_paragraph_pdf());
+    let path = fixture_pdf(
+        "wire-range",
+        razorpdf_core::test_fixtures::split_paragraph_pdf(),
+    );
     let mut mcp = McpClient::spawn();
     let out = mcp.call_tool(
         "read_pdf_page_range",
@@ -177,7 +183,10 @@ fn wire_page_range_slices_first_page() {
 
 #[test]
 fn wire_render_region_returns_webp_image() {
-    let path = fixture_pdf("wire-render", razorpdf_core::test_fixtures::bordered_table_pdf());
+    let path = fixture_pdf(
+        "wire-render",
+        razorpdf_core::test_fixtures::bordered_table_pdf(),
+    );
     let mut mcp = McpClient::spawn();
     let out = mcp.call_tool(
         "render_pdf_region",
@@ -226,7 +235,10 @@ fn wire_diff_identical_pdfs_all_unchanged() {
         razorpdf_core::test_fixtures::single_col_clean_pdf(),
     );
     let mut mcp = McpClient::spawn();
-    let out = mcp.call_tool("diff_pdfs", serde_json::json!({"old_path": old, "new_path": new}));
+    let out = mcp.call_tool(
+        "diff_pdfs",
+        serde_json::json!({"old_path": old, "new_path": new}),
+    );
     assert!(!is_tool_error(&out), "{}", tool_text(&out));
     let parsed: serde_json::Value = serde_json::from_str(tool_text(&out)).expect("json");
     assert!(parsed["unchanged"].as_u64().unwrap() > 0);
@@ -265,15 +277,25 @@ fn wire_tools_list_carries_complete_annotations() {
     assert_eq!(tools.len(), 10);
     for tool in tools {
         let name = tool["name"].as_str().expect("tool name");
-        let ann = tool.get("annotations").unwrap_or_else(|| panic!("{name} advertises no annotations"));
-        for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+        let ann = tool
+            .get("annotations")
+            .unwrap_or_else(|| panic!("{name} advertises no annotations"));
+        for hint in [
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        ] {
             assert!(
                 ann.get(hint).and_then(serde_json::Value::as_bool).is_some(),
                 "{name} missing explicit boolean {hint}"
             );
         }
         assert_eq!(ann["readOnlyHint"], true, "{name} must be read-only");
-        assert_eq!(ann["destructiveHint"], false, "{name} must be non-destructive");
+        assert_eq!(
+            ann["destructiveHint"], false,
+            "{name} must be non-destructive"
+        );
         assert_eq!(ann["idempotentHint"], true, "{name} must be idempotent");
         assert_eq!(ann["openWorldHint"], name == "parse_pdf", "{name}");
     }
@@ -287,15 +309,15 @@ fn wire_ping_and_notification_keep_session_alive() {
     // Notifications get no reply; the next request must still work.
     mcp.notify("notifications/initialized");
     let listed = mcp.request("tools/list", serde_json::json!({}));
-    assert_eq!(listed["result"]["tools"].as_array().expect("tools").len(), 10);
+    assert_eq!(
+        listed["result"]["tools"].as_array().expect("tools").len(),
+        10
+    );
 }
 
 #[test]
 fn wire_parse_real_invoice_sample() {
-    let invoice = format!(
-        "{}/../../samples/invoice.pdf",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let invoice = format!("{}/../../samples/invoice.pdf", env!("CARGO_MANIFEST_DIR"));
     assert!(std::path::Path::new(&invoice).exists(), "missing {invoice}");
     let mut mcp = McpClient::spawn();
     let out = mcp.call_tool("parse_pdf", serde_json::json!({"path": invoice}));
