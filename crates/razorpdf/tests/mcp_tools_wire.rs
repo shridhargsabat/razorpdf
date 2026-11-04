@@ -188,3 +188,70 @@ fn wire_render_region_returns_webp_image() {
     assert_eq!(block["mimeType"], "image/webp");
     assert!(block["data"].as_str().unwrap().starts_with("UklGR")); // base64 RIFF
 }
+
+#[test]
+fn wire_schema_extraction_returns_data_and_provenance() {
+    let path = fixture_pdf(
+        "wire-schema",
+        razorpdf_core::test_fixtures::single_col_clean_pdf(),
+    );
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"title": {"type": "string", "title": "Document Title"}}
+    });
+    let mut mcp = McpClient::spawn();
+    let out = mcp.call_tool(
+        "extract_pdf_schema",
+        serde_json::json!({"path": path, "schema": schema}),
+    );
+    assert!(!is_tool_error(&out), "{}", tool_text(&out));
+    let parsed: serde_json::Value = serde_json::from_str(tool_text(&out)).expect("json");
+    assert!(parsed.get("data").is_some());
+    assert!(parsed.get("provenance").is_some());
+    assert!(parsed.get("overall_confidence").is_some());
+
+    // Missing `schema` arg is a tool error, not a crash.
+    let missing = mcp.call_tool("extract_pdf_schema", serde_json::json!({"path": path}));
+    assert!(is_tool_error(&missing));
+}
+
+#[test]
+fn wire_diff_identical_pdfs_all_unchanged() {
+    let old = fixture_pdf(
+        "wire-diff-old",
+        razorpdf_core::test_fixtures::single_col_clean_pdf(),
+    );
+    let new = fixture_pdf(
+        "wire-diff-new",
+        razorpdf_core::test_fixtures::single_col_clean_pdf(),
+    );
+    let mut mcp = McpClient::spawn();
+    let out = mcp.call_tool("diff_pdfs", serde_json::json!({"old_path": old, "new_path": new}));
+    assert!(!is_tool_error(&out), "{}", tool_text(&out));
+    let parsed: serde_json::Value = serde_json::from_str(tool_text(&out)).expect("json");
+    assert!(parsed["unchanged"].as_u64().unwrap() > 0);
+    assert_eq!(parsed["modified"], 0);
+    assert_eq!(parsed["added"], 0);
+    assert_eq!(parsed["removed"], 0);
+    assert!(parsed.get("markdown_diff").is_some());
+    assert_eq!(parsed["old_path"], old);
+    assert_eq!(parsed["new_path"], new);
+}
+
+#[test]
+fn wire_annotations_lists_links_forms_footnotes() {
+    let path = fixture_pdf(
+        "wire-annots",
+        razorpdf_core::test_fixtures::single_col_clean_pdf(),
+    );
+    let mut mcp = McpClient::spawn();
+    let out = mcp.call_tool(
+        "extract_pdf_annotations_and_forms",
+        serde_json::json!({"path": path}),
+    );
+    assert!(!is_tool_error(&out), "{}", tool_text(&out));
+    let parsed: serde_json::Value = serde_json::from_str(tool_text(&out)).expect("json");
+    assert!(parsed.get("links").is_some());
+    assert!(parsed.get("form_fields").is_some());
+    assert!(parsed.get("footnotes").is_some());
+}
