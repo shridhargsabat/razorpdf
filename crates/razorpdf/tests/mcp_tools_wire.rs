@@ -255,3 +255,54 @@ fn wire_annotations_lists_links_forms_footnotes() {
     assert!(parsed.get("form_fields").is_some());
     assert!(parsed.get("footnotes").is_some());
 }
+
+#[test]
+fn wire_tools_list_carries_complete_annotations() {
+    let mut mcp = McpClient::spawn();
+    let listed = mcp.request("tools/list", serde_json::json!({}));
+    let tools = listed["result"]["tools"].as_array().expect("tools array");
+    // Non-vacuous: the loop below must cover all ten tools.
+    assert_eq!(tools.len(), 10);
+    for tool in tools {
+        let name = tool["name"].as_str().expect("tool name");
+        let ann = tool.get("annotations").unwrap_or_else(|| panic!("{name} advertises no annotations"));
+        for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+            assert!(
+                ann.get(hint).and_then(serde_json::Value::as_bool).is_some(),
+                "{name} missing explicit boolean {hint}"
+            );
+        }
+        assert_eq!(ann["readOnlyHint"], true, "{name} must be read-only");
+        assert_eq!(ann["destructiveHint"], false, "{name} must be non-destructive");
+        assert_eq!(ann["idempotentHint"], true, "{name} must be idempotent");
+        assert_eq!(ann["openWorldHint"], name == "parse_pdf", "{name}");
+    }
+}
+
+#[test]
+fn wire_ping_and_notification_keep_session_alive() {
+    let mut mcp = McpClient::spawn();
+    let pong = mcp.request("ping", serde_json::json!({}));
+    assert_eq!(pong["result"], serde_json::json!({}));
+    // Notifications get no reply; the next request must still work.
+    mcp.notify("notifications/initialized");
+    let listed = mcp.request("tools/list", serde_json::json!({}));
+    assert_eq!(listed["result"]["tools"].as_array().expect("tools").len(), 10);
+}
+
+#[test]
+fn wire_parse_real_invoice_sample() {
+    let invoice = format!(
+        "{}/../../samples/invoice.pdf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert!(std::path::Path::new(&invoice).exists(), "missing {invoice}");
+    let mut mcp = McpClient::spawn();
+    let out = mcp.call_tool("parse_pdf", serde_json::json!({"path": invoice}));
+    assert!(!is_tool_error(&out), "{}", tool_text(&out));
+    let parsed: serde_json::Value = serde_json::from_str(tool_text(&out)).expect("json");
+    assert_eq!(parsed["total_pages"], 1);
+    assert_eq!(parsed["fast_path_pages"], 1);
+    assert_eq!(parsed["chunks"].as_array().expect("chunks").len(), 6);
+    assert!(parsed["markdown"].as_str().unwrap().contains("TAX INVOICE"));
+}
