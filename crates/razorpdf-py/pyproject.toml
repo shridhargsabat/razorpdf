@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "razorpdf"
-version = "0.3.0"
+version = "0.3.1"
 description = "Hybrid local-first PDF parser: deterministic Rust geometry + selective sub-page VLM. Markdown + grounded RAG chunks."
 readme = { file = "../../README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
